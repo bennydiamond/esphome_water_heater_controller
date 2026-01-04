@@ -216,6 +216,7 @@ button:
   - platform: template
     name: Reset Current Out Of Range fault
     id: id_but_reset_current_fault
+    entity_category: "config"
     on_press:
       then:
         - logger.log:
@@ -357,6 +358,18 @@ datetime:
   - platform: template
     id: schedule2_end
     name: "Schedule 2 End Time"
+    type: time
+    optimistic: true
+    restore_value: true
+  - platform: template
+    id: schedule3_start
+    name: "Schedule 3 Start Time"
+    type: time
+    optimistic: true
+    restore_value: true
+  - platform: template
+    id: schedule3_end
+    name: "Schedule 3 End Time"
     type: time
     optimistic: true
     restore_value: true
@@ -557,7 +570,7 @@ binary_sensor:
       auto now_in_minutes = time.hour * 60 + time.minute;
 
       bool in_schedule1 = false;
-      if (id(schedule1_start).has_state() && id(schedule1_end).has_state()) {
+      if (id(schedule1_enabled).state && id(schedule1_start).has_state() && id(schedule1_end).has_state()) {
         auto start_in_minutes = id(schedule1_start).hour * 60 + id(schedule1_start).minute;
         auto end_in_minutes = id(schedule1_end).hour * 60 + id(schedule1_end).minute;
         if (start_in_minutes != end_in_minutes) { 
@@ -570,7 +583,7 @@ binary_sensor:
       }
 
       bool in_schedule2 = false;
-      if (id(schedule2_start).has_state() && id(schedule2_end).has_state()) {
+      if (id(schedule2_enabled).state && id(schedule2_start).has_state() && id(schedule2_end).has_state()) {
         auto start_in_minutes = id(schedule2_start).hour * 60 + id(schedule2_start).minute;
         auto end_in_minutes = id(schedule2_end).hour * 60 + id(schedule2_end).minute;
         if (start_in_minutes != end_in_minutes) { 
@@ -581,7 +594,21 @@ binary_sensor:
           }
         }
       }
-      return in_schedule1 || in_schedule2;
+
+      bool in_schedule3 = false;
+      if (id(schedule3_enabled).state && id(schedule3_start).has_state() && id(schedule3_end).has_state()) {
+        auto start_in_minutes = id(schedule3_start).hour * 60 + id(schedule3_start).minute;
+        auto end_in_minutes = id(schedule3_end).hour * 60 + id(schedule3_end).minute;
+        if (start_in_minutes != end_in_minutes) {
+          if (end_in_minutes < start_in_minutes) {
+            if (now_in_minutes >= start_in_minutes || now_in_minutes < end_in_minutes) in_schedule3 = true;
+          } else {
+            if (now_in_minutes >= start_in_minutes && now_in_minutes < end_in_minutes) in_schedule3 = true;
+          }
+        }
+      }
+
+      return in_schedule1 || in_schedule2 || in_schedule3;
 
   - platform: template
     name: "Error Detected"
@@ -700,6 +727,63 @@ switch:
           level: INFO
           tag: "WaterHeater"
           format: "Manual override DISABLED. Resuming automatic control."
+      - script.execute: control_logic
+
+  - platform: template
+    name: "Schedule 1 Enabled"
+    id: schedule1_enabled
+    icon: "mdi:calendar-check"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    on_turn_on:
+      - logger.log:
+          level: INFO
+          tag: "WaterHeater"
+          format: "Schedule 1 enabled."
+      - script.execute: control_logic
+    on_turn_off:
+      - logger.log:
+          level: INFO
+          tag: "WaterHeater"
+          format: "Schedule 1 disabled."
+      - script.execute: control_logic
+
+  - platform: template
+    name: "Schedule 2 Enabled"
+    id: schedule2_enabled
+    icon: "mdi:calendar-check"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    on_turn_on:
+      - logger.log:
+          level: INFO
+          tag: "WaterHeater"
+          format: "Schedule 2 enabled."
+      - script.execute: control_logic
+    on_turn_off:
+      - logger.log:
+          level: INFO
+          tag: "WaterHeater"
+          format: "Schedule 2 disabled."
+      - script.execute: control_logic
+
+  - platform: template
+    name: "Schedule 3 Enabled"
+    id: schedule3_enabled
+    icon: "mdi:calendar-check"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    on_turn_on:
+      - logger.log:
+          level: INFO
+          tag: "WaterHeater"
+          format: "Schedule 3 enabled."
+      - script.execute: control_logic
+    on_turn_off:
+      - logger.log:
+          level: INFO
+          tag: "WaterHeater"
+          format: "Schedule 3 disabled."
       - script.execute: control_logic
 
   - platform: template
