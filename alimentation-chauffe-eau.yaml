@@ -1,0 +1,1220 @@
+# ===================================================================
+#   ESPHome Smart Water Heater Controller
+# ===================================================================
+#
+#   Version: 1.4
+#   Author: Bennydiamond
+#
+#   ---------------------
+#   System Description
+#   ---------------------
+#   This project transforms a standard electric water heater into a
+#   smart, energy-efficient, and safe appliance. The core logic is
+#   state-driven, ensuring robust operation even in "Stand-Alone" mode
+#   when network connectivity is lost. Public health and safety remain
+#   the highest priority.
+#
+#   ---------------------
+#   Features & Behavior
+#   ---------------------
+#
+#   1. Salubrity (Legionella Prevention) - HIGHEST PRIORITY
+#      - A mandatory sanitization cycle runs at least once every 24 hours.
+#      - The cycle forces the relay ON until both upper and lower probes
+#        reach 60°C, then HOLDS for 30 continuous minutes.
+#      - This cycle operates independently of network status, relying on
+#        the onboard hardware RTC for precise timing.
+#      - Proactive Cycle Reset: If the tank naturally reaches and holds
+#        60°C for 30 minutes (e.g., due to high usage), the 24-hour
+#        countdown resets automatically.
+#
+#   2. Vacation Mode (Energy Saving)
+#      - A dedicated persistent switch forces the heater OFF immediately.
+#      - This overrides all other modes except for critical hardware Failsafes.
+#      - Useful for extended absences to prevent energy waste.
+#
+#   3. Manual Override Mode (With Safety Fallback)
+#      - Allows full manual control via Home Assistant switches.
+#      - IMMEDIATE FALLBACK: If API connectivity is lost, manual mode is
+#        temporarily ignored, and the device reverts to autonomous logic.
+#      - SAFETY RESET: If API connectivity is lost for amount of time defined in 
+#        manual_override_safety_deactivation_duration substitution variable, the
+#        Manual Switch is automatically turned OFF to prevent resuming
+#        an unsafe state upon reconnection.
+#
+#   4. Scheduled ON Mode
+#      - Two user-configurable time slots force the heater ON.
+#      - Ensures hot water availability during peak usage hours.
+#
+#   5. Off-Peak Economy Mode
+#      - The default mode. Heater remains OFF unless temperature drops
+#        below critical thresholds (50°C Upper / 45°C Lower).
+#      - Includes overshoot logic and anti-short-cycle delays to prevent
+#        relay wear.
+#
+#   6. Stand-Alone & Resilience (RTC + Connectivity Logic)
+#      - Hardware RTC (DS3231) ensures the controller knows the time
+#        even after power loss or network failure.
+#      - Stand-Alone Mode: If Wi-Fi or Home Assistant is lost, the
+#        controller continues to run Schedules and Salubrity cycles
+#        autonomously using the RTC.
+#      - Failsafe: Only triggers if the system time is invalid (Dead RTC + No Net)
+#        or if hardware probes fail. In Failsafe, the relay is forced ON.
+#
+#   7. Monitoring & Diagnostics
+#      - 16x2 LCD Display cycles through 5 pages of detailed status.
+#      - Connectivity Status: Explicitly displays "NET:OK", "HA:NO", etc.
+#      - Visual Alerts: Custom icons for Relay State, High Current, and Disconnection.
+#      - Sensor Optimization: Update intervals and delta filters are tuned
+#        to prevent database spam in Home Assistant while maintaining responsiveness.
+#
+# ===================================================================
+
+substitutions:
+  config_version: "1.4"
+  vacation_reason: "Mode Vacances"
+  default_log_level: "INFO"
+  uart_logger_baud_rate: 115200
+  api_reboot_timeout: 0s
+  factory_reset_boot_count: 5
+
+  # Temperature Settings
+  off_peak_upper_probe_trigger_celsius: "50.0"
+  off_peak_lower_probe_trigger_celsius: "45.0"
+  legionella_temp_celsius: "60.0"   # Target water temp is 60C, probes should read ~57C
+  drop_compensation_celsius: "3.0"  # Estimated temp difference between probe and water
+
+  # Hardware & Environment
+  relay_min_toggle_delay_seconds: "120"       # Prevent toggling relay too quickly
+  heater_active_current_threshold_amps: "17.0"
+  legionella_cycle_period_seconds: "86400"     # 24 Hours (in seconds). Regulations vary.
+  legionella_hold_duration_seconds: "1800"     # 30 Minutes (in seconds). Regulations vary.
+  boot_safety_delay_seconds: "15"              # Seconds. Time to wait after boot before allowing ANY heating.
+  probe_fail_timeout_seconds: "300"            # Seconds. How long a probe can be stale before triggering Failsafe.  
+  lcd_page_cycle_interval: "5s"        # How long to show each page on the LCD.
+  manual_override_safety_deactivation_duration: "4h"    # Turn off Manual Override switch if no connectivity for said amount of time. 
+  
+  # Current Range Monitoring
+  low_current_max_amps: "0.5"           # Acceptable when near zero
+  high_current_min_amps: "17.9"         # Lower bound of normal operating current
+  high_current_max_amps: "19.5"         # Upper bound of normal operating current
+  fault_trigger_duration: "15s"         # Must be out-of-range for this duration to trigger. Must be bigger than ct_clamp sensor's update_interval.
+
+esphome:
+  name: alimentation-chauffe-eau
+  friendly_name: Alimentation Chauffe Eau
+  project:
+    name: "DIY.Water Heater Controller"
+    version: ${config_version}
+  min_version: "2025.11.3"
+  on_boot:
+    - priority: 200
+      then:
+        - ds1307.read_time:
+            id: id_ds1307_time
+    - priority: 800
+      then:
+        - switch.turn_on: heater_relay
+        - text_sensor.template.publish:
+            id: relay_reason
+            state: "Démarrage"
+    - priority: -100
+      then:
+        - delay: 5s
+        - lambda: 'id(boot_screen_active) = false;'
+        - logger.log: { level: INFO, tag: "WaterHeater", format: "Entering Boot Mode." }
+    - priority: -90
+      then:
+        - lambda: 'id(current_out_of_range).send_state_internal(id(current_out_of_range_latch));'
+
+status_led:
+  pin:
+    number: GPIO15
+    inverted: true
+
+esp32:
+  board: lolin_s2_mini
+  framework:
+    type: esp-idf
+
+# -------------------------------------------------------------------
+#   Preferences
+# -------------------------------------------------------------------
+preferences:
+  flash_write_interval: 15min
+
+# -------------------------------------------------------------------
+#   Networking & Core Services
+# -------------------------------------------------------------------
+wifi:
+  id: id_wifi
+  use_address: 192.168.1.54
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  min_auth_mode: WPA2
+  passive_scan: true
+  enable_btm: false
+  enable_rrm: false
+  use_psram: true
+  power_save_mode: NONE
+  output_power: 16dB
+  manual_ip:
+    static_ip: 192.168.1.54
+    gateway: 192.168.0.3
+    subnet: 255.255.254.0
+    dns1: 192.168.0.11
+  ap:
+    ssid: "Water Heater Fallback"
+    password: !secret fallback_hotspot_password
+  reboot_timeout: 0s
+
+captive_portal:
+
+api:
+  on_client_disconnected: 
+    then:
+      - switch.turn_on: lcd_backlight
+      
+factory_reset:
+  resets_required: ${factory_reset_boot_count}
+  max_delay: 10s
+  on_increment:
+    - lambda: 'id(current_fast_boot_count) = x;'
+
+psram:
+  mode: quad
+  speed: 80MHz
+
+packages:
+  remote_package_files:
+    url: https://github.com/bennydiamond/common_esphome_template/
+    files: [esp-idf.common.yaml]
+    ref: master
+    refresh: 1h
+
+web_server:
+  port: 80
+
+time:
+  - platform: ds1307 # actually a DS3231
+    id: id_ds1307_time
+  - id: !extend id_sntp_time
+    on_time_sync:
+      then:
+        # Update the RTC when the synchronization was successful
+        - logger.log:
+            level: INFO
+            tag: "RTC"
+            format: "Synchronizing time to HW RTC"
+        - ds1307.write_time:
+            id: id_ds1307_time
+
+button:
+  - platform: factory_reset
+    id: id_but_factory_reset
+    internal: True
+  - platform: template
+    name: Reset Current Out Of Range fault
+    id: id_but_reset_current_fault
+    on_press:
+      then:
+        - logger.log:
+            level: INFO
+            tag: "WaterHeater"
+            format: "Current out-of-range fault manually reset."
+        - lambda: 'id(current_out_of_range_latch) = false;'
+        - binary_sensor.template.publish:
+            id: current_out_of_range
+            state: false
+        
+
+# -------------------------------------------------------------------
+#   Hardware Interface
+# -------------------------------------------------------------------
+one_wire:
+  - platform: gpio
+    pin: GPIO5 # Pin labeled D0 on Lolin S2 Mini
+
+i2c:
+  sda: GPIO18 # Pin labeled D3 on D1 Mini
+  scl: GPIO16 # Pin labeled D4 on D1 Mini
+  scan: true
+  frequency: 100kHz # default is 50KHz
+  #timeout: 300us # default is 100us on esp-idf
+  id: bus_a
+
+i2c_device:
+  id: ds3231_temp_sensor
+  address: 0x68
+
+# -------------------------------------------------------------------
+#   Globals & User Inputs
+# -------------------------------------------------------------------
+globals:
+  - id: lcd_page
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: last_legionella_cycle
+    type: time_t
+    restore_value: yes
+    initial_value: '0'
+  - id: off_peak_heating_active
+    type: bool
+    restore_value: yes
+    initial_value: 'false'
+  - id: off_peak_trigger_is_upper
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # --- Legionella Cycle State ---
+  - id: legionella_temp_reached_time
+    type: time_t
+    restore_value: yes
+    initial_value: '0'
+  - id: natural_legionella_hold_start_time
+    type: time_t
+    restore_value: yes
+    initial_value: '0'
+  - id: natural_cycle_logged
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # --- Relay Cycle Counter ---
+  - id: relay_cycle_count
+    type: int
+    restore_value: yes
+    initial_value: '0'
+  # --- ANTI-TOGGLE-V1: Timestamp of the last relay state change ---
+  - id: last_relay_toggle_time
+    type: time_t
+    restore_value: yes
+    initial_value: '0'
+  # --- Queued State for Manual Override ---
+  - id: has_queued_state
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: queued_desired_state
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # --- State Logging Flag ---
+  - id: current_operating_mode
+    type: int
+    restore_value: no # 0:Boot, 1:Override, 2:Scheduled, 3:Off-Peak, 4:Salubrity, 5:Vacation
+    initial_value: '0'
+  # --- Timestamps for Failsafe Checks ---
+  - id: last_upper_probe_update
+    type: time_t
+    restore_value: no
+    initial_value: '0'
+  - id: last_lower_probe_update
+    type: time_t
+    restore_value: no
+    initial_value: '0'
+  # Tracks if we are showing the boot splash screen
+  - id: boot_screen_active
+    type: bool
+    restore_value: no
+    initial_value: 'true'
+  # Tracks when the factory reset button was pressed (in millis)
+  - id: factory_reset_start_time
+    type: int
+    restore_value: no
+    initial_value: '0'
+  # Stores the current fast-boot count from the factory_reset component
+  - id: current_fast_boot_count
+    type: int
+    restore_value: no
+    initial_value: '0'
+  # --- Persisted latch for Current Out Of Range fault ---
+  - id: current_out_of_range_latch
+    type: bool
+    restore_value: yes
+    initial_value: 'false'
+
+datetime:
+  # --- Configurable "ON" schedules from Home Assistant ---
+  - platform: template
+    id: schedule1_start
+    name: "Schedule 1 Start Time"
+    type: time
+    optimistic: true
+    restore_value: true
+  - platform: template
+    id: schedule1_end
+    name: "Schedule 1 End Time"
+    type: time
+    optimistic: true
+    restore_value: true
+  - platform: template
+    id: schedule2_start
+    name: "Schedule 2 Start Time"
+    type: time
+    optimistic: true
+    restore_value: true
+  - platform: template
+    id: schedule2_end
+    name: "Schedule 2 End Time"
+    type: time
+    optimistic: true
+    restore_value: true
+
+number:
+  - platform: template
+    name: "Off-Peak Temp Overshoot"
+    id: temp_overshoot
+    entity_category: "config"
+    min_value: 1.0
+    max_value: 10.0
+    step: 0.5
+    initial_value: 5.0
+    optimistic: true
+
+# -------------------------------------------------------------------
+#   Sensors
+# -------------------------------------------------------------------
+sensor:
+  - platform: dallas_temp
+    address: 0xfa000000be51fd28
+    name: "Upper Tank Temp"
+    id: upper_probe
+    update_interval: 20s
+    filters:
+      - median: { window_size: 5, send_every: 1 }
+    on_value:
+      - lambda: id(last_upper_probe_update) = id(id_sntp_time).now().timestamp;
+
+  - platform: dallas_temp
+    address: 0xbd000000bd0b9228
+    name: "Lower Tank Temp"
+    id: lower_probe
+    update_interval: 20s
+    filters:
+      - median: { window_size: 5, send_every: 1 }
+    on_value:
+      - lambda: id(last_lower_probe_update) = id(id_sntp_time).now().timestamp;
+
+  - platform: dht
+    pin: 
+      number: GPIO9 # Pin labeled D6 on Lolin S2 Mini
+      mode:
+        input: true
+        pullup: false
+    model: DHT11
+    temperature: { name: "Enclosure Temp", id: id_sens_enclosure_temp }
+    humidity: { name: "Enclosure Humidity", id: id_sens_enclosure_humi }
+    update_interval: 30s
+  - platform: uptime
+    id: id_uptime_sensor_internal
+    internal: true # used for internal logic. Reported sensor value is updated less frequently.
+    update_interval: 5s
+  - platform: template
+    name: "Estimated Upper Water Temp"
+    unit_of_measurement: "°C"
+    icon: "mdi:thermometer-chevron-up"
+    update_interval: 1min
+    lambda: |-
+      return id(upper_probe).state + ${drop_compensation_celsius};
+  - platform: template
+    name: "Estimated Lower Water Temp"
+    unit_of_measurement: "°C"
+    icon: "mdi:thermometer-chevron-down"
+    update_interval: 1min
+    lambda: |-
+      return id(lower_probe).state + ${drop_compensation_celsius};
+  - platform: template
+    name: "Relay Cycle Count"
+    icon: "mdi:counter"
+    entity_category: "diagnostic"
+    lambda: |-
+      return id(relay_cycle_count);
+  - platform: internal_temperature
+    name: "ESP32 Internal Temperature"
+    update_interval: 1min
+  - platform: template
+    name: "Dernier Contrôle Salubrité"
+    device_class: timestamp
+    update_interval: 1min
+    icon: "mdi:shield-check"
+    lambda: |-
+      if (id(last_legionella_cycle) == 0) {
+        return {}; // Return NaN/unknown state
+      } else {
+        return id(last_legionella_cycle);
+      }
+  # --- Current Sensor Setup ---
+  - platform: adc
+    pin: GPIO3 # Pin labeled A0 on Lolin S2 Mini
+    id: source_adc
+    internal: true
+    name: ADC value
+    attenuation: 12db
+    #update_interval: 10ms
+  - platform: ct_clamp
+    sensor: source_adc
+    name: "Heater Current"
+    id: heater_current
+    update_interval: 5s
+    sample_duration: 334ms # 20 samples per cycle on 60Hz power
+    filters:
+      - calibrate_linear:
+          method: exact
+          # This filter must be calibrated for your specific hardware.
+          # 1. With no current flowing, the value should be 0.
+          # 2. Apply a known load (e.g., a 10A heater).
+          # 3. Note the value reported in the logs (e.g., 0.333).
+          # 4. Update the second line below with your measured value.
+          datapoints: 
+            - 0.016 -> 0.0
+            - 0.02055 -> 0.571
+            - 0.674 -> 18.46
+      - clamp:
+          min_value: 0 # do not expose negative values
+#      - delta: 0.2  # Only report if amps change by 0.2A or more
+    on_value:
+      then:
+        - if:
+            condition:
+              - not:
+                - or:
+                  - sensor.in_range:
+                      id: heater_current
+                      above: 0.0
+                      below: ${low_current_max_amps}
+                  - sensor.in_range:
+                      id: heater_current
+                      above: ${high_current_min_amps}
+                      below: ${high_current_max_amps}
+            then:
+              - binary_sensor.template.publish:
+                  id: current_out_of_range
+                  state: true
+  - platform: template
+    name: "RTC Internal Temperature"
+    id: id_sens_rtc_temp
+    unit_of_measurement: "°C"
+    device_class: "temperature"
+    state_class: "measurement"
+    accuracy_decimals: 1
+
+text_sensor:
+  - platform: template
+    name: "Relay State Reason"
+    id: relay_reason
+
+# -------------------------------------------------------------------
+#   Binary Sensors (including master error sensor)
+# -------------------------------------------------------------------
+binary_sensor:
+  - platform: gpio
+    pin: 
+      number: GPIO0
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+      ignore_strapping_warning: True
+    name: "Factory Reset Button"
+    id: gpio_0_button
+    entity_category: diagnostic
+    internal: true
+    # Using the PRESS to start the timer, and CLICK to trigger the action
+    on_press:
+      then:
+        - lambda: 'id(factory_reset_start_time) = millis();'
+    on_release:
+      then:
+        - lambda: 'id(factory_reset_start_time) = 0;'
+    on_click:
+    - min_length: 10s
+      max_length: 20s
+      then:
+        - button.press: id_but_factory_reset
+
+  - platform: template
+    name: "In Legionella Cycle"
+    id: in_legionella_cycle
+    lambda: |-
+      if ((id(id_sntp_time).now().timestamp - id(last_legionella_cycle)) > ${legionella_cycle_period_seconds}) return true;
+      if (id(legionella_temp_reached_time) != 0) {
+        if ((id(id_sntp_time).now().timestamp - id(legionella_temp_reached_time)) < ${legionella_hold_duration_seconds}) return true;
+      }
+      return false;
+
+  - platform: template
+    name: "In Scheduled ON Period"
+    id: in_scheduled_on_period
+    lambda: |-
+      // FIX: Only respect the Manual Override switch if the API is actually connected.
+      // If API is down, we ignore the switch and allow the Schedule to evaluate true.
+      if (id(id_switch_manual_override).state && id(id_api).is_connected()) {
+        return false; // Override is active AND online -> Ignore schedules
+      }
+      
+      auto time = id(id_sntp_time).now();
+      auto now_in_minutes = time.hour * 60 + time.minute;
+
+      bool in_schedule1 = false;
+      if (id(schedule1_start).has_state() && id(schedule1_end).has_state()) {
+        auto start_in_minutes = id(schedule1_start).hour * 60 + id(schedule1_start).minute;
+        auto end_in_minutes = id(schedule1_end).hour * 60 + id(schedule1_end).minute;
+        if (start_in_minutes != end_in_minutes) { 
+          if (end_in_minutes < start_in_minutes) { 
+            if (now_in_minutes >= start_in_minutes || now_in_minutes < end_in_minutes) in_schedule1 = true;
+          } else { 
+            if (now_in_minutes >= start_in_minutes && now_in_minutes < end_in_minutes) in_schedule1 = true;
+          }
+        }
+      }
+
+      bool in_schedule2 = false;
+      if (id(schedule2_start).has_state() && id(schedule2_end).has_state()) {
+        auto start_in_minutes = id(schedule2_start).hour * 60 + id(schedule2_start).minute;
+        auto end_in_minutes = id(schedule2_end).hour * 60 + id(schedule2_end).minute;
+        if (start_in_minutes != end_in_minutes) { 
+          if (end_in_minutes < start_in_minutes) { 
+            if (now_in_minutes >= start_in_minutes || now_in_minutes < end_in_minutes) in_schedule2 = true;
+          } else { 
+            if (now_in_minutes >= start_in_minutes && now_in_minutes < end_in_minutes) in_schedule2 = true;
+          }
+        }
+      }
+      return in_schedule1 || in_schedule2;
+
+  - platform: template
+    name: "Error Detected"
+    id: error_detected
+    device_class: problem
+    entity_category: "diagnostic"
+    lambda: |-
+      auto time_now = id(id_sntp_time).now();
+
+      // 1. CRITICAL: Time Validity Check
+      // If the RTC is dead AND we have no network (SNTP), we cannot run logic safely.
+      // This is the only "Connectivity/Time" related trigger for Failsafe.
+      if (!time_now.is_valid()) return true;
+
+      // 2. Hardware Health Checks (Probes)
+      // These must always trigger Failsafe, regardless of connectivity.
+      if (isnan(id(upper_probe).state) || isnan(id(lower_probe).state)) return true;
+
+      bool upper_stale = (time_now.timestamp - id(last_upper_probe_update)) > ${probe_fail_timeout_seconds};
+      bool lower_stale = (time_now.timestamp - id(last_lower_probe_update)) > ${probe_fail_timeout_seconds};
+      if (upper_stale || lower_stale) return true;
+
+      return false;
+  - platform: template
+    name: "Heater Relay Actual State"
+    device_class: power
+    lambda: |-
+      return id(heater_relay).state;
+
+  - platform: template
+    id: ha_long_disconnect_watchdog
+    internal: true
+    # Returns TRUE if we are disconnected
+    lambda: 'return !id(id_api).is_connected();'
+    filters:
+      # Only trigger if we have been disconnected continuously for 4 hours
+      - delayed_on: ${manual_override_safety_deactivation_duration}
+    on_press:
+      then:
+        - if:
+            condition:
+              switch.is_on: id_switch_manual_override
+            then:
+              - switch.turn_off: id_switch_manual_override
+              - logger.log:
+                  level: WARN
+                  tag: "Watchdog"
+                  format: "HA disconnected > 4h. Safety reset of Manual Override to OFF."
+
+  - platform: template
+    name: "Current Out of Range"
+    id: current_out_of_range
+    device_class: problem
+    entity_category: diagnostic
+    trigger_on_initial_state: false
+    filters:
+      - delayed_on: ${fault_trigger_duration}
+    on_press:
+      then:
+        - logger.log:
+            level: ERROR
+            tag: "WaterHeater"
+            format: "Heater current out of range! amps=%.2fA relay=%s"
+            args:
+              - 'id(heater_current).state'
+              - 'id(heater_relay).state ? "ON" : "OFF"'
+        - globals.set:
+            id: current_out_of_range_latch
+            value: 'true'
+
+# -------------------------------------------------------------------
+#   Switches & Buttons
+# -------------------------------------------------------------------
+switch:
+  - platform: gpio
+    pin: 
+      number: GPIO7 # Pin labeled D5 on Lolin S2 Mini
+      mode: OUTPUT_OPEN_DRAIN
+    id: heater_relay
+    name: "Water Heater Relay"
+    restore_mode: ALWAYS_ON
+    internal: true
+    on_turn_on:
+      then:
+        - lambda: id(relay_cycle_count) += 1;
+        - lambda: id(last_relay_toggle_time) = id(id_sntp_time).now().timestamp; # ANTI-TOGGLE-V1
+        - switch.turn_on: desired_state_switch
+    on_turn_off:
+      then:
+        - lambda: id(last_relay_toggle_time) = id(id_sntp_time).now().timestamp; # ANTI-TOGGLE-V1
+        - switch.turn_off: desired_state_switch
+
+  - platform: template
+    name: "LCD Backlight"
+    id: lcd_backlight
+    optimistic: true
+    restore_mode: ALWAYS_ON
+    turn_on_action:
+      - lambda: id(lcd_display).backlight();
+    turn_off_action:
+      - lambda: id(lcd_display).no_backlight();
+  - platform: template
+    name: "Manual Override"
+    id: id_switch_manual_override
+    icon: "mdi:calendar-sync"
+    restore_mode: ALWAYS_OFF
+    optimistic: true
+    on_turn_on:
+      - logger.log:
+          level: INFO
+          tag: "WaterHeater"
+          format: "Manual override ENABLED."
+      - script.execute: control_logic
+    on_turn_off:
+      - logger.log:
+          level: INFO
+          tag: "WaterHeater"
+          format: "Manual override DISABLED. Resuming automatic control."
+      - script.execute: control_logic
+
+  - platform: template
+    name: "Desired Relay State"
+    id: desired_state_switch
+    icon: "mdi:thermostat-box"
+    optimistic: true
+    on_turn_on:
+      - if:
+          condition:
+            and:
+              - switch.is_on: id_switch_manual_override
+              - api.connected:
+          then:
+            - if:
+                condition:
+                  or:
+                    - binary_sensor.is_on: in_legionella_cycle
+                    - binary_sensor.is_on: error_detected
+                    - sensor.in_range:
+                        id: id_uptime_sensor_internal
+                        below: ${boot_safety_delay_seconds}
+                then:
+                  - lambda: |-
+                      id(has_queued_state) = true;
+                      id(queued_desired_state) = true;
+                  - logger.log: "Relay ON queued, will apply when system is ready."
+                else:
+                  - script.execute: control_logic
+          else:
+            # Fallback/Sync logic (runs if Override is OFF OR API is Disconnected)
+            - if:
+                condition:
+                  - switch.is_off: heater_relay
+                then:
+                  - switch.turn_off: desired_state_switch
+    on_turn_off:
+      - if:
+          condition:
+            and:
+              - switch.is_on: id_switch_manual_override
+              - api.connected:
+          then:
+            - if:
+                condition:
+                  or:
+                    - binary_sensor.is_on: in_legionella_cycle
+                    - binary_sensor.is_on: error_detected
+                    - sensor.in_range:
+                        id: id_uptime_sensor_internal
+                        below: ${boot_safety_delay_seconds}
+                then:
+                  - lambda: |-
+                      id(has_queued_state) = true;
+                      id(queued_desired_state) = false;
+                  - logger.log: "Relay OFF queued, will apply when system is ready."
+                else:
+                  - script.execute: control_logic
+          else:
+            # Fallback/Sync logic (runs if Override is OFF OR API is Disconnected)
+            - if:
+                condition:
+                  - switch.is_on: heater_relay
+                then:
+                  - switch.turn_on: desired_state_switch
+
+  - platform: template
+    name: "Vacation Mode"
+    id: vacation_mode_switch
+    icon: "mdi:palm-tree"
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    # When toggled, immediately re-run the main logic to apply the new state
+    on_turn_on:
+      - logger.log: { level: INFO, tag: "WaterHeater", format: "Vacation Mode ENABLED. Heater SHUTDOWN." }
+      - script.execute: control_logic
+    on_turn_off:
+      - logger.log: { level: INFO, tag: "WaterHeater", format: "Vacation Mode DISABLED. Resuming control." }
+      - script.execute: control_logic
+
+# -------------------------------------------------------------------
+#   Timed Operations & Control Logic
+# -------------------------------------------------------------------
+interval:
+  - interval: ${lcd_page_cycle_interval}
+    then:
+      - lambda: |-
+          // Cycle through 5 pages now
+          // 0:Temps, 1:Amps, 2:Reason, 3:Status/Time, 4:Last Salubrity
+          id(lcd_page) = (id(lcd_page) + 1) % 5;
+  - interval: 1min
+    then:
+      - script.execute: control_logic
+  - interval: 2h
+    then:
+      - logger.log: { level: INFO , tag: "RTC", format: "Maintenance: Syncing internal clock from RTC to correct drift." }
+      - ds1307.read_time: id_ds1307_time
+  - interval: 30s # Manually read DS3231 RTC chip temperature sensor and publish to template sensor
+    startup_delay: 5s
+    then:
+      - lambda: |-
+          const uint8_t DS3231_REG_TEMPERATURE = 0x11;
+
+          uint8_t buf[2];
+          id(ds3231_temp_sensor).read_bytes(DS3231_REG_TEMPERATURE, buf, 2);
+          int8_t temp_msb = static_cast<int8_t>(buf[0]);
+          uint8_t temp_lsb = buf[1];
+          float temperature = temp_msb + ((temp_lsb >> 6) * 0.25f);
+
+          if ((temp_msb & 0x80) != 0) {
+              temperature = -temperature;
+            }
+
+          // Check for valid temperature range (DS3231: -40°C to +85°C)
+          if (temperature < -40.0f || temperature > 85.0f) 
+          {
+            ESP_LOGE("RTC", "Temperature reading out of range: %.2f°C", temperature);
+          } else
+          {
+            id(id_sens_rtc_temp).publish_state(temperature);
+            ESP_LOGV("RTC", "DS3231 Internal Temperature: %.2f°C", temperature);
+          }
+
+script:
+  # --- Main Dispatcher Script ---
+  - id: control_logic
+    mode: single
+    then:
+      # --- 0a. Failsafe Check ---
+      - if:
+          condition:
+            binary_sensor.is_on: error_detected
+          then:
+            - script.execute: failsafe_script
+            - script.stop: control_logic
+      
+      # --- 0b. Vacation Mode Check (Highest Priority Override) ---
+      - if:
+          condition:
+            switch.is_on: vacation_mode_switch
+          then:
+            # Force the relay OFF
+            - switch.turn_off: heater_relay
+            - text_sensor.template.publish: { id: relay_reason, state: "${vacation_reason}" }
+            - if:
+                condition:
+                  lambda: 'return id(current_operating_mode) != 5;' # 5:Vacation
+                then:
+                  - logger.log: { level: INFO, tag: "WaterHeater", format: "Entering Vacation Mode." }
+                  - lambda: 'id(current_operating_mode) = 5;'
+            # Stop all other logic
+            - script.stop: control_logic
+      
+      # --- 0c. Proactive Legionella Countdown Reset Check ---
+      - lambda: |-
+          auto time = id(id_sntp_time).now();
+          float compensated_upper = id(upper_probe).state + ${drop_compensation_celsius};
+          float compensated_lower = id(lower_probe).state + ${drop_compensation_celsius};
+
+          if (compensated_upper >= ${legionella_temp_celsius} && compensated_lower >= ${legionella_temp_celsius}) {
+            if (id(natural_legionella_hold_start_time) == 0) {
+              id(natural_legionella_hold_start_time) = time.timestamp;
+            }
+            if (id(natural_legionella_hold_start_time) != 0 && (time.timestamp - id(natural_legionella_hold_start_time)) >= ${legionella_hold_duration_seconds}) {
+              if (!id(natural_cycle_logged)) {
+                ESP_LOGI("WaterHeater", "Natural Salubrity condition met. Resetting Salubrity period timer.");
+                id(natural_cycle_logged) = true;
+              }
+              id(last_legionella_cycle) = time.timestamp;
+            }
+          } else {
+            id(natural_legionella_hold_start_time) = 0;
+            id(natural_cycle_logged) = false;
+          }
+
+      # --- 0d. Dispatch to correct state script ---
+      - if:
+          condition:
+            binary_sensor.is_on: in_legionella_cycle
+          then:
+            - script.execute: legionella_cycle_script
+          else:
+            - if:
+                condition:
+                  and:
+                    - switch.is_on: id_switch_manual_override
+                    - api.connected:
+                then:
+                  - script.execute: override_script
+                else:
+                  - if:
+                      condition:
+                        binary_sensor.is_on: in_scheduled_on_period
+                      then:
+                        - script.execute: scheduled_on_script
+                      else:
+                        - script.execute: off_peak_script
+
+  # --- Failsafe Script ---
+  - id: failsafe_script
+    mode: single
+    then:
+      - switch.turn_on: heater_relay
+      - text_sensor.template.publish: { id: relay_reason, state: "Failsafe: Erreur" }
+      - logger.log:
+          level: WARN
+          tag: "WaterHeater"
+          format: "Failsafe activated. Check error sensor for details."
+
+  # --- Legionella Cycle Management Script ---
+  - id: legionella_cycle_script
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return id(current_operating_mode) != 4;'
+          then:
+            - logger.log: { level: INFO, tag: "WaterHeater", format: "Entering Salubrity Cycle." }
+            - lambda: 'id(current_operating_mode) = 4;'
+      - text_sensor.template.publish: { id: relay_reason, state: "Cycle Salubrité" }
+      - switch.turn_on: heater_relay
+      - if:
+          condition:
+            lambda: 'return (id(upper_probe).state + ${drop_compensation_celsius} >= ${legionella_temp_celsius} && id(lower_probe).state + ${drop_compensation_celsius} >= ${legionella_temp_celsius});'
+          then:
+            - if:
+                condition:
+                  lambda: 'return id(legionella_temp_reached_time) == 0;'
+                then:
+                  - logger.log: { level: DEBUG, tag: "WaterHeater", format: "Both probes at temp. Starting Salubrity hold period." }
+                  - lambda: 'id(legionella_temp_reached_time) = id(id_sntp_time).now().timestamp;'
+            - if:
+                condition:
+                  lambda: 'return (id(id_sntp_time).now().timestamp - id(legionella_temp_reached_time)) >= ${legionella_hold_duration_seconds};'
+                then:
+                  - logger.log: { level: INFO, tag: "WaterHeater", format: "Salubrity cycle complete. Temp held for required duration." }
+                  - lambda: |-
+                      id(last_legionella_cycle) = id(id_sntp_time).now().timestamp;
+                      id(legionella_temp_reached_time) = 0; // Reset for next cycle
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(legionella_temp_reached_time) != 0;'
+                then:
+                  - logger.log: { level: WARN, tag: "WaterHeater", format: "Temp dropped during hold. Resetting timer." }
+                  - lambda: 'id(legionella_temp_reached_time) = 0;'
+
+  # --- Manual Override Script ---
+  - id: override_script
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return id(current_operating_mode) != 1;'
+          then:
+            - logger.log: { level: INFO, tag: "WaterHeater", format: "Entering Manual Override mode." }
+            - lambda: 'id(current_operating_mode) = 1;'
+      - if:
+          condition:
+            lambda: 'return id(has_queued_state);'
+          then:
+            - logger.log: { level: INFO, tag: "WaterHeater", format: "Applying queued state change." }
+            - if:
+                condition:
+                  lambda: 'return id(queued_desired_state);'
+                then:
+                  - switch.turn_on: desired_state_switch
+                else:
+                  - switch.turn_off: desired_state_switch
+            - lambda: 'id(has_queued_state) = false;'
+      - text_sensor.template.publish: { id: relay_reason, state: "Contrôle Manuel" }
+      - if:
+          condition:
+            switch.is_on: desired_state_switch
+          then:
+            - switch.turn_on: heater_relay
+          else:
+            - switch.turn_off: heater_relay
+
+  # --- Scheduled ON Period Script ---
+  - id: scheduled_on_script
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return id(current_operating_mode) != 2;'
+          then:
+            - logger.log: { level: INFO, tag: "WaterHeater", format: "Entering Scheduled ON mode." }
+            - lambda: 'id(current_operating_mode) = 2;'
+      - switch.turn_on: heater_relay
+      - text_sensor.template.publish: { id: relay_reason, state: "Période Active" }
+      - lambda: id(off_peak_heating_active) = false;
+
+  # --- Off-Peak Heating Script ---
+  - id: off_peak_script
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return id(current_operating_mode) != 3;'
+          then:
+            - logger.log: { level: INFO, tag: "WaterHeater", format: "Entering Off-Peak mode." }
+            - lambda: 'id(current_operating_mode) = 3;'
+      - if:
+          condition:
+            sensor.in_range:
+              id: id_uptime_sensor_internal
+              below: ${boot_safety_delay_seconds}
+          then:
+            - logger.log: { level: DEBUG, tag: "WaterHeater", format: "Boot delay active. Off-peak logic deferred." }
+            - script.stop: off_peak_script
+      - if:
+          condition:
+            lambda: 'return (id(id_sntp_time).now().timestamp - id(last_relay_toggle_time)) < ${relay_min_toggle_delay_seconds};'
+          then:
+            - logger.log:
+                level: DEBUG
+                tag: "WaterHeater"
+                format: "Anti-toggle delay active. Deferring. Upper: %.1fC, Lower: %.1fC"
+                args:
+                  - 'id(upper_probe).state'
+                  - 'id(lower_probe).state'
+            - script.stop: off_peak_script
+      - lambda: |-
+          float compensated_upper = id(upper_probe).state + ${drop_compensation_celsius};
+          float compensated_lower = id(lower_probe).state + ${drop_compensation_celsius};
+
+          if (id(off_peak_heating_active)) {
+            bool turn_off = false;
+            if (id(off_peak_trigger_is_upper)) {
+              if (compensated_upper >= (${off_peak_upper_probe_trigger_celsius} + id(temp_overshoot).state)) turn_off = true;
+            } else {
+              if (compensated_lower >= (${off_peak_lower_probe_trigger_celsius} + id(temp_overshoot).state)) turn_off = true;
+            }
+
+            if (turn_off) {
+              id(heater_relay).turn_off();
+              id(off_peak_heating_active) = false;
+              id(relay_reason).publish_state("Période Inactive");
+            } else {
+              id(heater_relay).turn_on();
+              id(relay_reason).publish_state("Chauffe Éco");
+            }
+          } else {
+            if (compensated_upper < ${off_peak_upper_probe_trigger_celsius}) {
+              id(off_peak_heating_active) = true;
+              id(off_peak_trigger_is_upper) = true;
+              id(heater_relay).turn_on();
+              id(relay_reason).publish_state("Chauffe Éco");
+            } else if (compensated_lower < ${off_peak_lower_probe_trigger_celsius}) {
+              id(off_peak_heating_active) = true;
+              id(off_peak_trigger_is_upper) = false;
+              id(heater_relay).turn_on();
+              id(relay_reason).publish_state("Chauffe Éco");
+            } else {
+              id(heater_relay).turn_off();
+              id(relay_reason).publish_state("Période Inactive");
+            }
+          }
+
+# -------------------------------------------------------------------
+#   Display
+# -------------------------------------------------------------------
+display:
+  - platform: lcd_pcf8574
+    id: lcd_display
+    dimensions: 16x2
+    address: 0x3F
+    update_interval: 500ms
+    user_characters:
+      - position: 2 # mapped to \x02 (ô)
+        data: [0b00100, 0b01010, 0b00000, 0b01110, 0b10001, 0b10001, 0b01110, 0b00000]
+      - position: 3 # mapped to \x03 (é)
+        data: [0b00010, 0b00100, 0b01110, 0b10001, 0b11110, 0b10000, 0b01110, 0b00000]
+      - position: 4 # mapped to \x04 (É)
+        data: [0b00010, 0b00100, 0b01111, 0b10000, 0b10000, 0b11110, 0b10000, 0b11111]
+      - position: 5 # mapped to \x05 Broken Chain / Disconnected Icon (Plug)
+        data: [0b01010, 0b01010, 0b11111, 0b11111, 0b01110, 0b00100, 0b00100, 0b00100]
+      - position: 6 # mapped to \x06 (lightning bolt)
+        data: [0b00010, 0b00110, 0b01100, 0b11100, 0b11111, 0b00110, 0b01100, 0b11000]
+      - position: 7  # mapped to \x07 (relay on symbol)
+        data: [0b00000, 0b01110, 0b11111, 0b11111, 0b11111, 0b01110, 0b00000, 0b00000]
+    lambda: |-
+      // ---------------------------------------------------------
+      // PRIORITY 1: FACTORY RESET BUTTON (GPIO0)
+      // ---------------------------------------------------------
+      if (id(gpio_0_button).state) {
+        int held_ms = millis() - id(factory_reset_start_time);
+        int held_sec = held_ms / 1000;
+        int remaining = 10 - held_sec; 
+
+        it.print(0, 0, "FACTORY RESET");
+        
+        if (remaining > 0) {
+           it.printf(0, 1, "Hold: %ds...", remaining);
+           if (millis() % 500 > 250) it.print(15, 0, "!");
+        } else {
+           it.print(0, 1, "RELEASE NOW!");
+           it.print(15, 1, "*"); 
+        }
+        return; 
+      }
+
+      // ---------------------------------------------------------
+      // PRIORITY 2: BOOT SPLASH SCREEN
+      // ---------------------------------------------------------
+      if (id(boot_screen_active)) {
+        // Line 1: Versions
+        it.printf(0, 0, "Chauffe-eau v${config_version}");
+        
+        // Line 2: Fast Boot Reset Counter
+        // We get 'current_fast_boot_count' from the on_increment trigger.
+        // If this is a normal single boot, the count is usually 1.
+        int target = ${factory_reset_boot_count};
+        int current = id(current_fast_boot_count);
+        
+        // Safety: If current is 0 (first power up), treat it as 1 for visual clarity
+        if (current == 0) current = 1;
+        
+        int remaining_boots = target - current;
+        
+        // If we are getting close, show exclamation!
+        if (remaining_boots <= 1) {
+           it.printf(0, 1, "Reset: %d LEFT!", remaining_boots);
+        } else {
+           it.printf(0, 1, "Reset: %d left", remaining_boots);
+        }
+        return; 
+      }
+
+      // ---------------------------------------------------------
+      // STANDARD PAGES (Existing Logic)
+      // ---------------------------------------------------------
+      float amps = id(heater_current).state;
+      
+      // Determine Statuses
+      bool ha_connected = id(id_api).is_connected();
+      bool wifi_connected = wifi::global_wifi_component->is_connected();
+
+      if (id(lcd_page) == 0) {
+        // Page 1: Temperatures
+        it.printf(0, 0, "Haut:%.1f\xDF""C", id(upper_probe).state);
+        it.printf(0, 1, "Bas :%.1f\xDF""C", id(lower_probe).state);
+
+      } else if (id(lcd_page) == 1) {
+        // Page 2: Relay Status & Amps
+        it.printf(0, 0, "Relais: %s", id(heater_relay).state ? "ON" : "OFF");
+        it.printf(0, 1, "Courant: %.1fA", amps);
+
+      } else if (id(lcd_page) == 2) {
+        // Page 3: Relay Reason (Full detailed text)
+        std::string reason = id(relay_reason).state;
+        
+        // Handle Accents
+        size_t pos = 0;
+        while ((pos = reason.find("é", pos)) != std::string::npos) { reason.replace(pos, 2, "\x03"); pos += 1; }
+        pos = 0;
+        while ((pos = reason.find("ô", pos)) != std::string::npos) { reason.replace(pos, 2, "\x02"); pos += 1; }
+        pos = 0;
+        while ((pos = reason.find("É", pos)) != std::string::npos) { reason.replace(pos, 2, "\x04"); pos += 1; }
+
+        if (reason.length() > 14) {
+            size_t split_pos = reason.rfind(' ', 13);
+            if (split_pos != std::string::npos && split_pos > 0) {
+                it.print(0, 0, reason.substr(0, split_pos).c_str());
+                it.print(0, 1, reason.substr(split_pos + 1).c_str());
+            } else {
+                it.print(0, 0, reason.substr(0, 14).c_str());
+                it.print(0, 1, reason.substr(14).c_str());
+            }
+        } else {
+            it.print(0, 0, reason.c_str());
+        }
+
+      } else if (id(lcd_page) == 3) {
+        // Page 4: System Status & Clock
+        if (wifi_connected) {
+            if (ha_connected) {
+                it.print(0, 0, "NET:OK HA:OK");
+            } else {
+                it.print(0, 0, "NET:OK HA:NO");
+            }
+        } else {
+            it.print(0, 0, "NET:NO HA:NO");
+        }
+        auto time = id(id_ds1307_time).now();
+        it.printf(0, 1, "%02d/%02d %02d:%02d", time.day_of_month, time.month, time.hour, time.minute);
+
+      } else if (id(lcd_page) == 4) {
+        // Page 5: Last Salubrity Check Time
+        
+        // Line 1: Header (13 chars, fits before icons)
+        it.print(0, 0, "Fin Salubrite");
+        
+        // Line 2: Time
+        if (id(last_legionella_cycle) == 0) {
+            it.print(0, 1, "Jamais");
+        } else {
+            // Convert the stored timestamp into a local time structure
+            auto check_time = ESPTime::from_epoch_local(id(last_legionella_cycle));
+            // Format: HH:MM:SS
+            it.printf(0, 1, "%02d:%02d:%02d", check_time.hour, check_time.minute, check_time.second);
+        }
+      }
+      
+      // --- Status Icons (Right Aligned, visible on ALL pages) ---
+      
+      // (15,0) Relay State
+      if (id(heater_relay).state) it.print(15, 0, "\x07");
+      
+      // (14,0) Disconnected Icon (Plug)
+      if (!ha_connected) it.print(14, 0, "\x05");
+
+      // (15,1) High Current
+      if (amps > ${heater_active_current_threshold_amps}) it.print(15, 1, "\x06");
+      
+      // (14,1) Critical Error
+      if (id(error_detected).state) it.print(14, 1, "!");
