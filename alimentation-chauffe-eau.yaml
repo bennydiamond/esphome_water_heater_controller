@@ -2,7 +2,7 @@
 #   ESPHome Smart Water Heater Controller
 # ===================================================================
 #
-#   Version: 1.4
+#   Version: 1.5
 #   Author: Bennydiamond
 #
 #   ---------------------
@@ -71,7 +71,7 @@
 # ===================================================================
 
 substitutions:
-  config_version: "1.4"
+  config_version: "1.5"
   vacation_reason: "Mode Vacances"
   default_log_level: "INFO"
   uart_logger_baud_rate: 115200
@@ -98,7 +98,7 @@ substitutions:
   low_current_max_amps: "0.5"           # Acceptable when near zero
   high_current_min_amps: "17.9"         # Lower bound of normal operating current
   high_current_max_amps: "19.5"         # Upper bound of normal operating current
-  fault_trigger_duration: "15s"         # Must be out-of-range for this duration to trigger. Must be bigger than ct_clamp sensor's update_interval.
+  fault_trigger_duration: "20s"         # Must be out-of-range for this duration to trigger. Must be bigger than ct_clamp sensor's update_interval.
 
 esphome:
   name: alimentation-chauffe-eau
@@ -108,24 +108,24 @@ esphome:
     version: ${config_version}
   min_version: "2025.11.3"
   on_boot:
-    - priority: 200
-      then:
-        - ds1307.read_time:
-            id: id_ds1307_time
-    - priority: 800
+    - priority: 799
       then:
         - switch.turn_on: heater_relay
         - text_sensor.template.publish:
             id: relay_reason
             state: "Démarrage"
+    - priority: 599
+      then:
+        - lambda: 'id(current_out_of_range).send_state_internal(id(current_out_of_range_latch));'
+    - priority: 200
+      then:
+        - ds1307.read_time:
+            id: id_ds1307_time
     - priority: -100
       then:
         - delay: 5s
         - lambda: 'id(boot_screen_active) = false;'
         - logger.log: { level: INFO, tag: "WaterHeater", format: "Entering Boot Mode." }
-    - priority: -90
-      then:
-        - lambda: 'id(current_out_of_range).send_state_internal(id(current_out_of_range_latch));'
 
 status_led:
   pin:
@@ -143,6 +143,9 @@ esp32:
 preferences:
   flash_write_interval: 15min
 
+debug:
+  update_interval: 5s
+
 # -------------------------------------------------------------------
 #   Networking & Core Services
 # -------------------------------------------------------------------
@@ -156,8 +159,8 @@ wifi:
   enable_btm: false
   enable_rrm: false
   use_psram: true
-  power_save_mode: NONE
-  output_power: 16dB
+  power_save_mode: LIGHT
+  output_power: 14dB
   manual_ip:
     static_ip: 192.168.1.54
     gateway: 192.168.0.3
@@ -389,6 +392,18 @@ number:
 #   Sensors
 # -------------------------------------------------------------------
 sensor:
+  - platform: debug
+    free:
+      name: "Heap Free"
+    block:
+      name: "Heap Max Block"
+    loop_time:
+      name: "Loop Time"
+    psram:
+      name: "Free PSRAM"
+    cpu_frequency:
+      name: "CPU Frequency"
+
   - platform: dallas_temp
     address: 0xfa000000be51fd28
     name: "Upper Tank Temp"
@@ -494,7 +509,6 @@ sensor:
                 - or:
                   - sensor.in_range:
                       id: heater_current
-                      above: 0.0
                       below: ${low_current_max_amps}
                   - sensor.in_range:
                       id: heater_current
@@ -516,6 +530,11 @@ text_sensor:
   - platform: template
     name: "Relay State Reason"
     id: relay_reason
+  - platform: debug
+    device:
+      name: "Device Info"
+    reset_reason:
+      name: "Reset Reason"
 
 # -------------------------------------------------------------------
 #   Binary Sensors (including master error sensor)
