@@ -2,7 +2,7 @@
 #   ESPHome Smart Water Heater Controller
 # ===================================================================
 #
-#   Version: 1.5
+#   Version: 1.6
 #   Author: Bennydiamond
 #
 #   ---------------------
@@ -71,7 +71,7 @@
 # ===================================================================
 
 substitutions:
-  config_version: "1.5"
+  config_version: "1.6"
   vacation_reason: "Mode Vacances"
   default_log_level: "INFO"
   uart_logger_baud_rate: 115200
@@ -518,6 +518,14 @@ sensor:
               - binary_sensor.template.publish:
                   id: current_out_of_range
                   state: true
+            else:
+              - if:
+                  condition:
+                    lambda: 'return !id(current_out_of_range_latch);'
+                  then:
+                    - binary_sensor.template.publish:
+                        id: current_out_of_range
+                        state: false
   - platform: template
     name: "RTC Internal Temperature"
     id: id_sens_rtc_temp
@@ -682,18 +690,31 @@ binary_sensor:
     id: current_out_of_range
     device_class: problem
     entity_category: diagnostic
-    trigger_on_initial_state: false
+    # This lambda is evaluated every time any sensor it depends on updates
+    lambda: |-
+      float amps = id(heater_current).state;
+      
+      // Define what "Normal" looks like:
+      bool is_low = (amps <= ${low_current_max_amps});
+      bool is_high = (amps >= ${high_current_min_amps} && amps <= ${high_current_max_amps});
+      
+      // If it's NOT low AND NOT high, it's out of range
+      if (!(is_low || is_high)) {
+        return true; 
+      }
+      return false;
     filters:
+      # This is the "Debounce": it MUST be true for 20s straight to turn the sensor ON
       - delayed_on: ${fault_trigger_duration}
+      # Optional: delayed_off if you want it to stay 'Problem' for a bit after fixing
+      - delayed_off: 5s 
     on_press:
       then:
         - logger.log:
             level: ERROR
             tag: "WaterHeater"
-            format: "Heater current out of range! amps=%.2fA relay=%s"
-            args:
-              - 'id(heater_current).state'
-              - 'id(heater_relay).state ? "ON" : "OFF"'
+            format: "Heater current out of range for 20s! amps=%.2fA"
+            args: ['id(heater_current).state']
         - globals.set:
             id: current_out_of_range_latch
             value: 'true'
