@@ -2,7 +2,7 @@
 #   ESPHome Smart Water Heater Controller
 # ===================================================================
 #
-#   Version: 1.6
+#   Version: 1.7
 #   Author: Bennydiamond
 #
 #   ---------------------
@@ -71,7 +71,7 @@
 # ===================================================================
 
 substitutions:
-  config_version: "1.6"
+  config_version: "1.7"
   vacation_reason: "Mode Vacances"
   default_log_level: "INFO"
   uart_logger_baud_rate: 115200
@@ -82,7 +82,7 @@ substitutions:
   off_peak_upper_probe_trigger_celsius: "50.0"
   off_peak_lower_probe_trigger_celsius: "45.0"
   legionella_temp_celsius: "60.0"   # Target water temp is 60C, probes should read ~57C
-  drop_compensation_celsius: "3.0"  # Estimated temp difference between probe and water
+  drop_compensation_celsius: "5.0"  # Estimated temp difference between probe and water
 
   # Hardware & Environment
   relay_min_toggle_delay_seconds: "120"       # Prevent toggling relay too quickly
@@ -538,11 +538,50 @@ text_sensor:
   - platform: template
     name: "Relay State Reason"
     id: relay_reason
+    internal: true
+    on_value:
+      then:
+        - component.update: relay_reason_ha_proxy
   - platform: debug
     device:
       name: "Device Info"
     reset_reason:
       name: "Reset Reason"
+
+
+select:
+  - platform: template
+    name: "Relay State Reason"
+    id: relay_reason_ha_proxy
+    icon: "mdi:comment-question-outline"
+    entity_category: "diagnostic"
+    optimistic: false
+    options:
+      - "Démarrage"
+      - "Mode Vacances"
+      - "Cycle Salubrité"
+      - "Contrôle Manuel"
+      - "Période Active"
+      - "Chauffe Éco"
+      - "Période Inactive"
+      - "Failsafe: Erreur"
+      - "⚠️ Erreur Synchro"
+    lambda: |-
+      std::string current_text = id(relay_reason).state;
+      
+      // Handle the boot/empty state
+      if (current_text.empty()) return {"Démarrage"};
+
+      // Use the API method from the documentation you provided
+      if (id(relay_reason_ha_proxy).has_option(current_text)) {
+        return current_text;
+      }
+
+      // Fallback if the string isn't in the options list
+      return {"⚠️ Erreur Synchro"};
+    
+    set_action:
+      - logger.log: "Read-only proxy. Change ignored."
 
 # -------------------------------------------------------------------
 #   Binary Sensors (including master error sensor)
@@ -644,6 +683,7 @@ binary_sensor:
     entity_category: "diagnostic"
     lambda: |-
       auto time_now = id(id_sntp_time).now();
+      float uptime = id(id_uptime_sensor_internal).state;
 
       // 1. CRITICAL: Time Validity Check
       // If the RTC is dead AND we have no network (SNTP), we cannot run logic safely.
@@ -651,12 +691,15 @@ binary_sensor:
       if (!time_now.is_valid()) return true;
 
       // 2. Hardware Health Checks (Probes)
-      // These must always trigger Failsafe, regardless of connectivity.
-      if (isnan(id(upper_probe).state) || isnan(id(lower_probe).state)) return true;
+      // We ONLY run these if the boot grace period has passed.
+      // This prevents the "NaN" at boot from triggering a false Failsafe.
+      if (uptime > ${boot_safety_delay_seconds}) {
+        if (isnan(id(upper_probe).state) || isnan(id(lower_probe).state)) return true;
 
-      bool upper_stale = (time_now.timestamp - id(last_upper_probe_update)) > ${probe_fail_timeout_seconds};
-      bool lower_stale = (time_now.timestamp - id(last_lower_probe_update)) > ${probe_fail_timeout_seconds};
-      if (upper_stale || lower_stale) return true;
+        bool upper_stale = (time_now.timestamp - id(last_upper_probe_update)) > ${probe_fail_timeout_seconds};
+        bool lower_stale = (time_now.timestamp - id(last_lower_probe_update)) > ${probe_fail_timeout_seconds};
+        if (upper_stale || lower_stale) return true;
+      }
 
       return false;
   - platform: template
