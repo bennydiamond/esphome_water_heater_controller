@@ -29,7 +29,7 @@ Note: No hardware design documentation is provided. This repo assumes you will d
 - Only in Vacation Mode is salubrity deactivated; while Vacation Mode is ON, the heater is forced OFF and salubrity cycles are not executed.
 
 ## Hardware Used 
-- AC‑DC 220V → 5V DC converter, galvanically isolated
+- AC‑DC 220V → 5V DC converter, galvanically isolated. Using a UL-certified AC-DC "wall" adapter with proper specs is an acceptable solution.
 - ESP32‑S2 Lolin Mini
 - DHT11 (for enclosure temperature and humidity)
 - Two Dallas 1‑Wire temperature probes (e.g., DS18B20) for upper and lower tank temps
@@ -41,6 +41,87 @@ Note: No hardware design documentation is provided. This repo assumes you will d
 
 Recommended extras (design‑dependent, not provided): appropriate fusing, contactor/relay isolation, pull‑ups for 1‑Wire/I2C as needed, ferrules, DIN‑rail enclosure, strain relief, and mains‑rated wiring/clearances.
 
+### Photos
+
+| Installed & Mounted | Interior Close-up |
+| --- | --- |
+| ![Unit installed and mounted](photos/unit_installed.jpg) | ![Unit interior close-up](photos/unit_closeup.jpg) |
+
+### System Architecture
+
+High-level schematic of how system components are connected.
+
+```mermaid
+flowchart LR
+    classDef network fill:#2d3748,stroke:#4a5568,stroke-width:2px,color:#fff
+    classDef mcu fill:#2b6cb0,stroke:#2c5282,stroke-width:2px,color:#fff
+    classDef sensor fill:#2f855a,stroke:#276749,stroke-width:2px,color:#fff
+    classDef power fill:#c53030,stroke:#9b2c2c,stroke-width:2px,color:#fff
+    classDef load fill:#d69e2e,stroke:#b7791f,stroke-width:2px,color:#fff
+    classDef bus fill:#4a5568,stroke:#2d3748,stroke-width:2px,color:#fff
+
+    subgraph External ["External Network"]
+        NTP["NTP Server"]:::network
+        HA["Home Assistant"]:::network
+    end
+
+    subgraph HighVoltage ["High Voltage (240V AC)"]
+        Breaker["240V Breaker Panel"]:::power
+        L1_Tap((Tap L1)):::power
+        L2_Tap((Tap L2)):::power
+        Relay["Relay Board (Main Contactor)"]:::power
+    end
+
+    CT["CT Clamp"]:::sensor
+
+    subgraph LowVoltage ["Low Voltage Control (5V / 3.3V)"]
+        PSU["5V 2A DC Power Supply"]:::power
+        ESP["ESP32 Controller"]:::mcu
+        I2C{{"I2C Bus"}}:::bus
+        OneWire{{"1-Wire Bus"}}:::bus
+        DHT["DHT11 (Encl. Temp/Hum)"]:::sensor
+        RTC["DS3231 RTC"]:::sensor
+        LCD["16x2 LCD Display"]:::sensor
+        ProbeUp["Upper Temp (DS18B20)"]:::sensor
+        ProbeDn["Lower Temp (DS18B20)"]:::sensor
+    end
+
+    subgraph Appliance ["Physical Load"]
+        Heater[("Electric Water Heater")]:::load
+    end
+
+    NTP -.->|"SNTP"| ESP
+    HA <-->|"API"| ESP
+
+    Breaker -->|"L1 In"| L1_Tap
+    Breaker -->|"L2 In"| L2_Tap
+    L1_Tap -->|"Black (L1)"| Relay
+    L2_Tap -->|"Red (L2)"| Relay
+
+    L1_Tap -.->|"240V Tap"| PSU
+    L2_Tap -.->|"240V Tap"| PSU
+
+    PSU -->|"5V DC"| ESP
+
+    ESP <--> I2C
+    ESP <--> OneWire
+    I2C <--> RTC
+    I2C <--> LCD
+    OneWire <--> ProbeUp
+    OneWire <--> ProbeDn
+
+    ESP <-->|"Data"| DHT
+
+    ESP -->|"3.3V Control"| Relay
+    Relay -->|"Black (L1 Out)"| CT
+    CT -->|"Black (L1 Out)"| Heater
+    Relay -->|"Red (L2 Out)"| Heater
+
+    CT -->|"ADC Signal"| ESP
+    ProbeUp -.->|"Measures"| Heater
+    ProbeDn -.->|"Measures"| Heater
+```
+
 ## Safety Notes
 - Mains electricity is dangerous. Build only if you are qualified and comply with local electrical codes.
 - Provide proper isolation, creepage/clearance, fusing, and over‑current protection.
@@ -50,18 +131,33 @@ Recommended extras (design‑dependent, not provided): appropriate fusing, conta
 
 ## Configure & Flash
 1. Install ESPHome CLI.
-2. Adjust substitutions and secrets.
-3. Build and upload.
+2. Start from the example device configuration in `example/device.yaml` to integrate this package into your own ESPHome node.
+3. Adjust substitutions and secrets for your board, wiring, and network.
+4. Build and upload.
 
-```bash
-# Inside the repo folder
-esphome run alimentation-chauffe-eau.yaml
-# or, to just compile
-esphome compile alimentation-chauffe-eau.yaml
-```
+
+### Hardware Substitutions
+
+The shared package in `alimentation-chauffe-eau.yaml` expects board-specific values to be defined in the `substitutions:` block of your device file. The repository includes `example/device.yaml` as a working example of how to implement the package and override the hardware-dependent values.
+
+These substitutions are design-specific. You must review them and set them for your own board and wiring rather than copying the example blindly.
+
+| Substitution key | Required for | Description |
+| --- | --- | --- |
+| `contactor_gpio_pin` | Relay/contactor control | GPIO that drives the heater contactor or relay board. Set this to the output actually connected to your switching stage. |
+| `contactor_gpio_pin_mode` | Relay/contactor control | ESPHome pin mode used for the relay output, for example `OUTPUT` or `OUTPUT_OPEN_DRAIN`, depending on how your driver circuit is designed. |
+| `one_wire_bus_gpio` | Dallas probes | GPIO connected to the 1-Wire bus used by the tank temperature probes. |
+| `dallas_probe_upper_address` | Upper tank probe | 64-bit ROM address of the upper Dallas probe on the 1-Wire bus. This is not a GPIO, but it is part of the hardware mapping required for the package to read the correct sensor. |
+| `dallas_probe_lower_address` | Lower tank probe | 64-bit ROM address of the lower Dallas probe on the 1-Wire bus. |
+| `i2c_bus_sda_gpio` | I2C bus | GPIO used for the SDA line shared by the RTC and LCD backpack. |
+| `i2c_bus_scl_gpio` | I2C bus | GPIO used for the SCL line shared by the RTC and LCD backpack. |
+| `dht_sensor_gpio` | Enclosure DHT sensor | GPIO connected to the DHT sensor used for enclosure temperature and humidity monitoring. |
+| `adc_clamp_gpio` | CT clamp input | ADC-capable GPIO connected to the current clamp measurement circuit. Pick a pin that is valid for ADC on your ESP32 variant. |
+| `factory_reset_gpio` | Reset button | GPIO used by the factory reset push button. On the example board this is the boot button, but your design may use a different pin. |
 
 ## Key Configuration Points
 - Substitutions let you tune temperatures, timing, and current ranges without editing logic.
+- Hardware-related substitutions, especially GPIO assignments, must be defined in your device YAML to match your own electrical design.
 - RTC synchronization: SNTP updates the DS3231 when available; otherwise the RTC drives schedules.
 - Anti‑toggle timing prevents rapid relay cycling.
 - Manual override respects HA connectivity; if HA is down, autonomous logic resumes.

@@ -1,0 +1,83 @@
+
+substitutions:
+  device_name: "alimentation-chauffe-eau"
+  device_friendly_name: "Alimentation Chauffe Eau"
+  device_ip: "192.168.1.54"
+
+# GPIO pin definitions
+  contactor_gpio_pin: "GPIO7" # Pin labeled D5 on Lolin S2 Mini
+  contactor_gpio_pin_mode: "OUTPUT_OPEN_DRAIN"
+
+  one_wire_bus_gpio: "GPIO5" # Pin labeled D0 on Lolin S2 Mini
+  dallas_probe_upper_address: "0xfa000000be51fd28"
+  dallas_probe_lower_address: "0xbd000000bd0b9228"
+
+  i2c_bus_sda_gpio: "GPIO18" # Pin labeled D3 on Lolin S2 Mini
+  i2c_bus_scl_gpio: "GPIO16" # Pin labeled D4 on Lolin S2 Mini
+
+  dht_sensor_gpio: "GPIO9" # Pin labeled D6 on Lolin S2 Mini'
+  
+  adc_clamp_gpio: "GPIO3" # Pin labeled A0 on Lolin S2 Mini
+
+  factory_reset_gpio: "GPIO0" # Pin labeled D3 on Lolin S2 Mini (with pull-up, used for factory reset button)
+
+esp32:
+  board: lolin_s2_mini
+  framework:
+    type: esp-idf
+
+wifi:
+  id: id_wifi
+  use_address: ${device_ip}
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  min_auth_mode: WPA2
+  passive_scan: true
+  enable_btm: false
+  enable_rrm: false
+  use_psram: true
+  power_save_mode: LIGHT
+  output_power: 14dB
+  manual_ip:
+    static_ip: ${device_ip}
+    gateway: 192.168.0.3
+    subnet: 255.255.254.0
+    dns1: 192.168.0.11
+  ap:
+    ssid: ${device_name}
+    password: !secret fallback_hotspot_password
+  reboot_timeout: 0s
+
+captive_portal:
+
+psram:
+  mode: quad
+  speed: 80MHz
+
+status_led:
+  pin:
+    number: GPIO15
+    inverted: true
+
+debug:
+  update_interval: 5s
+
+sensor:
+  - platform: debug
+    free:
+      name: "Heap Free"
+    block:
+      name: "Heap Max Block"
+    loop_time:
+      name: "Loop Time"
+    psram:
+      name: "Free PSRAM"
+    cpu_frequency:
+      name: "CPU Frequency"
+
+packages:
+  remote_package_files:
+    url: https://github.com/bennydiamond/esphome_water_heater_controller
+    files: [alimentation-chauffe-eau.yaml]
+    ref: master
+    refresh: 1h
