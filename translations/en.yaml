@@ -1,0 +1,35 @@
+substitutions:
+  tr_vacation_reason: "Vacation Mode"
+
+  tr_relay_reason_boot: "Boot"
+  tr_relay_reason_vacation: "Vacation"
+  tr_relay_reason_legionella: "Sanitize Cycle"
+  tr_relay_reason_manual: "Manual Ctrl"
+  tr_relay_reason_scheduled: "Active Period"
+  tr_relay_reason_eco_heating: "Eco Heating"
+  tr_relay_reason_eco_idle: "Idle Period"
+  tr_relay_reason_failsafe: "Failsafe: Error"
+  tr_relay_reason_sync_error: "Sync Error"
+
+  # 14 characters max
+  tr_lcd_page0_upper: "Upper:"
+  tr_lcd_page0_lower: "Lower:"
+  tr_lcd_page1_relay_fmt: "Relay: %s"
+  tr_lcd_page1_relay_on: "ON"
+  tr_lcd_page1_relay_off: "OFF"
+  tr_lcd_page1_current_fmt: "Current: %.1fA"
+  tr_lcd_page3_net_ok_ha_ok: "NET:OK HA:OK"
+  tr_lcd_page3_net_ok_ha_no: "NET:OK HA:NO"
+  tr_lcd_page3_net_no_ha_no: "NET:NO HA:NO"
+  tr_lcd_page4_header: "Sanitize End"
+  tr_lcd_page4_never: "Never"
+
+  # 16 characters max
+  tr_lcd_boot_reset_normal: "Rst: %d left"
+  tr_lcd_boot_reset_warning: "RST: %d LEFT!"
+  tr_lcd_factory_reset_title: "Factory Reset"
+  tr_lcd_factory_reset_hold: "Hold: %ds..."
+  tr_lcd_factory_reset_release: "RELEASE NOW!"
+
+  # This will have version number appended, so keep it short
+  tr_lcd_boot_splash_title: "WaterHeat"

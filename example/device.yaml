@@ -32,12 +32,6 @@ wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
   min_auth_mode: WPA2
-  passive_scan: true
-  enable_btm: false
-  enable_rrm: false
-  use_psram: true
-  power_save_mode: LIGHT
-  output_power: 14dB
   manual_ip:
     static_ip: ${device_ip}
     gateway: 192.168.0.3
@@ -46,13 +40,9 @@ wifi:
   ap:
     ssid: ${device_name}
     password: !secret fallback_hotspot_password
-  reboot_timeout: 0s
+  reboot_timeout: 24h
 
 captive_portal:
-
-psram:
-  mode: quad
-  speed: 80MHz
 
 status_led:
   pin:
@@ -70,14 +60,21 @@ sensor:
       name: "Heap Max Block"
     loop_time:
       name: "Loop Time"
-    psram:
-      name: "Free PSRAM"
     cpu_frequency:
       name: "CPU Frequency"
+
+text_sensor:
+  - platform: debug
+    device:
+      name: "Device Info"
+    reset_reason:
+      name: "Reset Reason"
 
 packages:
   remote_package_files:
     url: https://github.com/bennydiamond/esphome_water_heater_controller
-    files: [alimentation-chauffe-eau.yaml]
+    files:
+      - alimentation-chauffe-eau.yaml
+      - translations/fr.yaml # Select language by choosing one translation file here
     ref: master
     refresh: 1h

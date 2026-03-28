@@ -135,6 +135,22 @@ flowchart LR
 3. Adjust substitutions and secrets for your board, wiring, and network.
 4. Build and upload.
 
+### Language Selection
+
+In your device file, select the language by adding exactly one translation file in `packages.remote_package_files.files`.
+Current supported languages are located in the `translations` folder of this package.
+
+Example:
+
+```yaml
+packages:
+    remote_package_files:
+        url: https://github.com/bennydiamond/esphome_water_heater_controller
+        files:
+            - alimentation-chauffe-eau.yaml
+            - translations/fr.yaml  # or translations/en.yaml
+```
+
 
 ### Hardware Substitutions
 
