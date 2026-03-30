@@ -87,7 +87,6 @@ substitutions:
 
   # Hardware & Environment
   relay_min_toggle_delay_seconds: "120"       # Prevent toggling relay too quickly
-  heater_active_current_threshold_amps: "17.0"
   legionella_cycle_period_seconds: "86400"     # 24 Hours (in seconds). Regulations vary.
   legionella_hold_duration_seconds: "1800"     # 30 Minutes (in seconds). Regulations vary.
   boot_safety_delay_seconds: "15"              # Seconds. Time to wait after boot before allowing ANY heating.
@@ -115,9 +114,6 @@ esphome:
         - text_sensor.template.publish:
             id: relay_reason
             state: "${tr_relay_reason_boot}"
-    - priority: 599
-      then:
-        - lambda: 'id(current_out_of_range).send_state_internal(id(current_out_of_range_latch));'
     - priority: 200
       then:
         - ds1307.read_time:
@@ -177,20 +173,6 @@ button:
   - platform: factory_reset
     id: id_but_factory_reset
     internal: True
-  - platform: template
-    name: Reset Current Out Of Range fault
-    id: id_but_reset_current_fault
-    entity_category: "config"
-    on_press:
-      then:
-        - logger.log:
-            level: INFO
-            tag: "WaterHeater"
-            format: "Current out-of-range fault manually reset."
-        - lambda: 'id(current_out_of_range_latch) = false;'
-        - binary_sensor.template.publish:
-            id: current_out_of_range
-            state: false
         
 
 # -------------------------------------------------------------------
@@ -421,62 +403,7 @@ sensor:
       } else {
         return id(last_legionella_cycle);
       }
-  # --- Current Sensor Setup ---
-  - platform: adc
-    pin: ${adc_clamp_gpio}
-    id: source_adc
-    internal: true
-    name: ADC value
-    attenuation: 12db
-    samples: 5
-    update_interval: 500ms
-  - platform: ct_clamp
-    sensor: source_adc
-    name: "Heater Current"
-    id: heater_current
-    update_interval: 5s
-    sample_duration: 334ms # 20 samples per cycle on 60Hz power
-    filters:
-      - calibrate_linear:
-          method: exact
-          # This filter must be calibrated for your specific hardware.
-          # 1. With no current flowing, the value should be 0.
-          # 2. Apply a known load (e.g., a 10A heater).
-          # 3. Note the value reported in the logs (e.g., 0.333).
-          # 4. Update the second line below with your measured value.
-          datapoints: 
-            - 0.016 -> 0.0
-            - 0.02055 -> 0.571
-            - 0.674 -> 18.46
-      - clamp:
-          min_value: 0 # do not expose negative values
-#      - delta: 0.2  # Only report if amps change by 0.2A or more
-      - lambda: if (x < 0.2) return 0; else return x; # Kill the "Relay Off" antenna noise
-    on_value:
-      then:
-        - if:
-            condition:
-              - not:
-                - or:
-                  - sensor.in_range:
-                      id: heater_current
-                      below: ${low_current_max_amps}
-                  - sensor.in_range:
-                      id: heater_current
-                      above: ${high_current_min_amps}
-                      below: ${high_current_max_amps}
-            then:
-              - binary_sensor.template.publish:
-                  id: current_out_of_range
-                  state: true
-            else:
-              - if:
-                  condition:
-                    lambda: 'return !id(current_out_of_range_latch);'
-                  then:
-                    - binary_sensor.template.publish:
-                        id: current_out_of_range
-                        state: false
+
   - platform: template
     name: "RTC Internal Temperature"
     id: id_sens_rtc_temp
@@ -673,39 +600,6 @@ binary_sensor:
                   tag: "Watchdog"
                   format: "HA disconnected > 4h. Safety reset of Manual Override to OFF."
 
-  - platform: template
-    name: "Current Out of Range"
-    id: current_out_of_range
-    device_class: problem
-    entity_category: diagnostic
-    # This lambda is evaluated every time any sensor it depends on updates
-    lambda: |-
-      float amps = id(heater_current).state;
-      
-      // Define what "Normal" looks like:
-      bool is_low = (amps <= ${low_current_max_amps});
-      bool is_high = (amps >= ${high_current_min_amps} && amps <= ${high_current_max_amps});
-      
-      // If it's NOT low AND NOT high, it's out of range
-      if (!(is_low || is_high)) {
-        return true; 
-      }
-      return false;
-    filters:
-      # This is the "Debounce": it MUST be true for 20s straight to turn the sensor ON
-      - delayed_on: ${fault_trigger_duration}
-      # Optional: delayed_off if you want it to stay 'Problem' for a bit after fixing
-      - delayed_off: 5s 
-    on_press:
-      then:
-        - logger.log:
-            level: ERROR
-            tag: "WaterHeater"
-            format: "Heater current out of range for 20s! amps=%.2fA"
-            args: ['id(heater_current).state']
-        - globals.set:
-            id: current_out_of_range_latch
-            value: 'true'
 
 # -------------------------------------------------------------------
 #   Switches & Buttons
@@ -1253,9 +1147,7 @@ display:
 
       // ---------------------------------------------------------
       // STANDARD PAGES (Existing Logic)
-      // ---------------------------------------------------------
-      float amps = id(heater_current).state;
-      
+      // ---------------------------------------------------------      
       // Determine Statuses
       bool ha_connected = id(id_api).is_connected();
       bool wifi_connected = wifi::global_wifi_component->is_connected();
@@ -1266,9 +1158,8 @@ display:
         it.printf(0, 1, "${tr_lcd_page0_lower}%.1f\xDF""C", id(lower_probe).state);
 
       } else if (id(lcd_page) == 1) {
-        // Page 2: Relay Status & Amps
+        // Page 2: Relay Status
         it.printf(0, 0, "${tr_lcd_page1_relay_fmt}", id(heater_relay).state ? "${tr_lcd_page1_relay_on}" : "${tr_lcd_page1_relay_off}");
-        it.printf(0, 1, "${tr_lcd_page1_current_fmt}", amps);
 
       } else if (id(lcd_page) == 2) {
         // Page 3: Relay Reason (Full detailed text)
@@ -1340,9 +1231,6 @@ display:
       
       // (14,0) Disconnected Icon (Plug)
       if (!ha_connected) it.print(14, 0, "\x05");
-
-      // (15,1) High Current
-      if (amps > ${heater_active_current_threshold_amps}) it.print(15, 1, "\x06");
       
       // (14,1) Critical Error
       if (id(error_detected).state) it.print(14, 1, "!");
