@@ -158,6 +158,7 @@ packages:
 web_server:
   id: id_web_server
   port: 80
+  include_internal: ${web_server_include_internal}
 
 time:
   - platform: ds1307 # actually a DS3231
@@ -348,6 +349,26 @@ number:
     step: 0.5
     initial_value: 5.0
     optimistic: true
+  - platform: template
+    name: "Relay Cycle Count (Set)"
+    id: relay_cycle_count_setter
+    internal: true  # Web UI only, not exposed to Home Assistant
+    icon: "mdi:counter"
+    mode: box
+    min_value: 0
+    max_value: 100000
+    step: 1
+    lambda: |-
+      return id(relay_cycle_count);
+    set_action:
+      - globals.set:
+          id: relay_cycle_count
+          value: !lambda 'return (int)x;'
+      - logger.log:
+          level: WARN
+          tag: "WaterHeater"
+          format: "Relay cycle count manually set to %d"
+          args: ['(int)x']
 
 # -------------------------------------------------------------------
 #   Sensors
@@ -373,16 +394,6 @@ sensor:
     on_value:
       - lambda: id(last_lower_probe_update) = id(id_sntp_time).now().timestamp;
 
-  - platform: dht
-    pin: 
-      number: ${dht_sensor_gpio}
-      mode:
-        input: true
-        pullup: false
-    model: DHT11
-    temperature: { name: "Enclosure Temp", id: id_sens_enclosure_temp }
-    humidity: { name: "Enclosure Humidity", id: id_sens_enclosure_humi }
-    update_interval: 30s
   - platform: uptime
     id: id_uptime_sensor_internal
     internal: true # used for internal logic. Reported sensor value is updated less frequently.
@@ -428,8 +439,6 @@ sensor:
     internal: true
     name: ADC value
     attenuation: 12db
-    samples: 5
-    update_interval: 500ms
   - platform: ct_clamp
     sensor: source_adc
     name: "Heater Current"
@@ -715,6 +724,7 @@ switch:
     pin: 
       number: ${contactor_gpio_pin}
       mode: ${contactor_gpio_pin_mode}
+    inverted: ${contactor_gpio_inverted}
     id: heater_relay
     name: "Water Heater Relay"
     restore_mode: ALWAYS_ON
