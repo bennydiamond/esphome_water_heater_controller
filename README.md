@@ -40,12 +40,6 @@ Note: No hardware design documentation is provided. This repo assumes you will d
 
 Recommended extras (design‑dependent, not provided): appropriate fusing, contactor/relay isolation, pull‑ups for 1‑Wire/I2C as needed, ferrules, DIN‑rail enclosure, strain relief, and mains‑rated wiring/clearances.
 
-### Photos
-
-| Installed & Mounted | Interior Close-up |
-| --- | --- |
-| ![Unit installed and mounted](photos/unit_installed.jpg) | ![Unit interior close-up](photos/unit_closeup.jpg) |
-
 ### System Architecture
 
 High-level schematic of how system components are connected.
@@ -118,6 +112,31 @@ flowchart TB
     ProbeUp -.->|"Measures"| Heater
     ProbeDn -.->|"Measures"| Heater
 ```
+
+### Electrical Schematic
+
+Main wiring schematic:
+
+![Main schematic](schematic/main_schematic.png)
+
+Editable CAD source (DXF, zipped):
+
+- [schematic/DXF_Water Heater Controller_2026-4-4.zip](schematic/DXF_Water%20Heater%20Controller_2026-4-4.zip)
+
+#### Note
+Not represented in the schematic is the AC/DC converter sourcing from dual phases 240V and outputting 5VDC to entire system.
+
+Also not represented is metal enclosure wired to protective earth/ground.
+
+Please note that regulations in most region would prevent sourcing 5V power from outside the system. It would also be against regulations to connect AC/DC converter to a single phase and protective earth/ground. 
+
+
+
+### Photos
+
+| Installed & Mounted | Interior Close-up |
+| --- | --- |
+| ![Unit installed and mounted](photos/unit_installed.jpg) | ![Unit interior close-up](photos/unit_closeup.jpg) |
 
 ## Safety Notes
 - Mains electricity is dangerous. Build only if you are qualified and comply with local electrical codes.
