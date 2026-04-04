@@ -1,0 +1,35 @@
+substitutions:
+  tr_vacation_reason: "Mode Vacances"
+
+  tr_relay_reason_boot: "Démarrage"
+  tr_relay_reason_vacation: "Mode Vacances"
+  tr_relay_reason_legionella: "Cycle Salubrité"
+  tr_relay_reason_manual: "Contrôle Manuel"
+  tr_relay_reason_scheduled: "Période Active"
+  tr_relay_reason_eco_heating: "Chauffe Éco"
+  tr_relay_reason_eco_idle: "Période Inactive"
+  tr_relay_reason_failsafe: "Failsafe: Erreur"
+  tr_relay_reason_sync_error: "⚠️ Erreur Synchro"
+
+  # 14 characters max
+  tr_lcd_page0_upper: "Haut:"
+  tr_lcd_page0_lower: "Bas :"
+  tr_lcd_page1_relay_fmt: "Relais: %s"
+  tr_lcd_page1_relay_on: "ON"
+  tr_lcd_page1_relay_off: "OFF"
+  tr_lcd_page1_current_fmt: "Courant: %.1fA"
+  tr_lcd_page3_net_ok_ha_ok: "NET:OK HA:OK"
+  tr_lcd_page3_net_ok_ha_no: "NET:OK HA:NO"
+  tr_lcd_page3_net_no_ha_no: "NET:NO HA:NO"
+  tr_lcd_page4_header: "Fin Salubrité"
+  tr_lcd_page4_never: "Jamais"
+
+  # 16 characters max
+  tr_lcd_boot_reset_normal: "RAZ: %d restant"
+  tr_lcd_boot_reset_warning: "RAZ: %d RESTANT!"
+  tr_lcd_factory_reset_title: "Remise a zéro"
+  tr_lcd_factory_reset_hold: "Appuyer: %ds..."
+  tr_lcd_factory_reset_release: "RELACHER!"
+
+  # This will have version number appended, so keep it short
+  tr_lcd_boot_splash_title: "Chauffe-eau"

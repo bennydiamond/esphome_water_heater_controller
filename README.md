@@ -22,7 +22,7 @@ Note: No hardware design documentation is provided. This repo assumes you will d
   - Built-in fallback AP + captive portal if Wi‑Fi cannot connect.
   - Lightweight onboard web server for quick local inspection.
   - Periodic “maintenance” resync from the hardware RTC to reduce drift.
-  - Factory reset UX: long‑press GPIO0 to trigger reset, plus an LCD boot/reset screen.
+  - Factory reset: long‑press GPIO0 to trigger reset, or 5 successive short reboots to wipe persisted config
 
 ### Mode Precedence
 - Salubrity preempts all other modes (including Manual Override and Schedules) to ensure public‑health compliance.
@@ -31,7 +31,6 @@ Note: No hardware design documentation is provided. This repo assumes you will d
 ## Hardware Used 
 - AC‑DC 220V → 5V DC converter, galvanically isolated. Using a UL-certified AC-DC "wall" adapter with proper specs is an acceptable solution.
 - ESP32‑S2 Lolin Mini
-- DHT11 (for enclosure temperature and humidity)
 - Two Dallas 1‑Wire temperature probes (e.g., DS18B20) for upper and lower tank temps
 - Single CT clamp, 30 A
 - Dual 30 A relay board, both relays wired to toggle simultaneously
@@ -41,18 +40,12 @@ Note: No hardware design documentation is provided. This repo assumes you will d
 
 Recommended extras (design‑dependent, not provided): appropriate fusing, contactor/relay isolation, pull‑ups for 1‑Wire/I2C as needed, ferrules, DIN‑rail enclosure, strain relief, and mains‑rated wiring/clearances.
 
-### Photos
-
-| Installed & Mounted | Interior Close-up |
-| --- | --- |
-| ![Unit installed and mounted](photos/unit_installed.jpg) | ![Unit interior close-up](photos/unit_closeup.jpg) |
-
 ### System Architecture
 
 High-level schematic of how system components are connected.
 
 ```mermaid
-flowchart LR
+flowchart TB
     classDef network fill:#2d3748,stroke:#4a5568,stroke-width:2px,color:#fff
     classDef mcu fill:#2b6cb0,stroke:#2c5282,stroke-width:2px,color:#fff
     classDef sensor fill:#2f855a,stroke:#276749,stroke-width:2px,color:#fff
@@ -79,7 +72,6 @@ flowchart LR
         ESP["ESP32 Controller"]:::mcu
         I2C{{"I2C Bus"}}:::bus
         OneWire{{"1-Wire Bus"}}:::bus
-        DHT["DHT11 (Encl. Temp/Hum)"]:::sensor
         RTC["DS3231 RTC"]:::sensor
         LCD["16x2 LCD Display"]:::sensor
         ProbeUp["Upper Temp (DS18B20)"]:::sensor
@@ -90,9 +82,6 @@ flowchart LR
         Heater[("Electric Water Heater")]:::load
     end
 
-    NTP -.->|"SNTP"| ESP
-    HA <-->|"API"| ESP
-
     Breaker -->|"L1 In"| L1_Tap
     Breaker -->|"L2 In"| L2_Tap
     L1_Tap -->|"Black (L1)"| Relay
@@ -101,6 +90,7 @@ flowchart LR
     L1_Tap -.->|"240V Tap"| PSU
     L2_Tap -.->|"240V Tap"| PSU
 
+    PSU -->|"5V DC"| Relay
     PSU -->|"5V DC"| ESP
 
     ESP <--> I2C
@@ -110,8 +100,9 @@ flowchart LR
     OneWire <--> ProbeUp
     OneWire <--> ProbeDn
 
-    ESP <-->|"Data"| DHT
-
+    NTP -.->|"SNTP"| ESP
+    HA <-->|"API"| ESP
+    
     ESP -->|"3.3V Control"| Relay
     Relay -->|"Black (L1 Out)"| CT
     CT -->|"Black (L1 Out)"| Heater
@@ -121,6 +112,31 @@ flowchart LR
     ProbeUp -.->|"Measures"| Heater
     ProbeDn -.->|"Measures"| Heater
 ```
+
+### Electrical Schematic
+
+Main wiring schematic:
+
+![Main schematic](schematic/main_schematic.png)
+
+Editable CAD source (DXF, zipped):
+
+- [schematic/DXF_Water Heater Controller_2026-4-4.zip](schematic/DXF_Water%20Heater%20Controller_2026-4-4.zip)
+
+#### Note
+Not represented in the schematic is the AC/DC converter sourcing from dual phases 240V and outputting 5VDC to entire system.
+
+Also not represented is metal enclosure wired to protective earth/ground.
+
+Please note that regulations in most region would prevent sourcing 5V power from outside the system. It would also be against regulations to connect AC/DC converter to a single phase and protective earth/ground. 
+
+
+
+### Photos
+
+| Installed & Mounted | Interior Close-up |
+| --- | --- |
+| ![Unit installed and mounted](photos/unit_installed.jpg) | ![Unit interior close-up](photos/unit_closeup.jpg) |
 
 ## Safety Notes
 - Mains electricity is dangerous. Build only if you are qualified and comply with local electrical codes.
@@ -135,6 +151,22 @@ flowchart LR
 3. Adjust substitutions and secrets for your board, wiring, and network.
 4. Build and upload.
 
+### Language Selection
+
+In your device file, select the language by adding exactly one translation file in `packages.remote_package_files.files`.
+Current supported languages are located in the `translations` folder of this package.
+
+Example:
+
+```yaml
+packages:
+    remote_package_files:
+        url: https://github.com/bennydiamond/esphome_water_heater_controller
+        files:
+            - alimentation-chauffe-eau.yaml
+            - translations/fr.yaml  # or translations/en.yaml
+```
+
 
 ### Hardware Substitutions
 
@@ -146,12 +178,12 @@ These substitutions are design-specific. You must review them and set them for y
 | --- | --- | --- |
 | `contactor_gpio_pin` | Relay/contactor control | GPIO that drives the heater contactor or relay board. Set this to the output actually connected to your switching stage. |
 | `contactor_gpio_pin_mode` | Relay/contactor control | ESPHome pin mode used for the relay output, for example `OUTPUT` or `OUTPUT_OPEN_DRAIN`, depending on how your driver circuit is designed. |
+| `contactor_gpio_inverted` | Relay/contactor control | ESPHome pin inversion logic used for the relay output, for example `true` or `false`, depending on how your driver circuit is designed. |
 | `one_wire_bus_gpio` | Dallas probes | GPIO connected to the 1-Wire bus used by the tank temperature probes. |
 | `dallas_probe_upper_address` | Upper tank probe | 64-bit ROM address of the upper Dallas probe on the 1-Wire bus. This is not a GPIO, but it is part of the hardware mapping required for the package to read the correct sensor. |
 | `dallas_probe_lower_address` | Lower tank probe | 64-bit ROM address of the lower Dallas probe on the 1-Wire bus. |
 | `i2c_bus_sda_gpio` | I2C bus | GPIO used for the SDA line shared by the RTC and LCD backpack. |
 | `i2c_bus_scl_gpio` | I2C bus | GPIO used for the SCL line shared by the RTC and LCD backpack. |
-| `dht_sensor_gpio` | Enclosure DHT sensor | GPIO connected to the DHT sensor used for enclosure temperature and humidity monitoring. |
 | `adc_clamp_gpio` | CT clamp input | ADC-capable GPIO connected to the current clamp measurement circuit. Pick a pin that is valid for ADC on your ESP32 variant. |
 | `factory_reset_gpio` | Reset button | GPIO used by the factory reset push button. On the example board this is the boot button, but your design may use a different pin. |
 
@@ -163,3 +195,6 @@ These substitutions are design-specific. You must review them and set them for y
 - Manual override respects HA connectivity; if HA is down, autonomous logic resumes.
 - Manual state changes can be queued when heating is temporarily disallowed (e.g., during boot delay, salubrity cycle, or failsafe) and applied when safe.
 - Salubrity has highest priority and runs regardless of Manual Override; only Vacation Mode suppresses salubrity.
+
+## Todo
+- Self-monitoring of enclosure temperature based on RTC's internal temperature sensor (and optionally ESP32 internal temperature sensor)

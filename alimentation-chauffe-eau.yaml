@@ -74,7 +74,6 @@ substitutions:
   device_name: "alimentation_chauffe_eau"
   device_friendly_name: "Alimentation Chauffe Eau"
   config_version: "1.8"
-  vacation_reason: "Mode Vacances"
   default_log_level: "INFO"
   uart_logger_baud_rate: 115200
   api_reboot_timeout: 0s
@@ -98,7 +97,7 @@ substitutions:
   
   # Current Range Monitoring
   low_current_max_amps: "0.5"           # Acceptable when near zero
-  high_current_min_amps: "17.9"         # Lower bound of normal operating current
+  high_current_min_amps: "17.5"         # Lower bound of normal operating current
   high_current_max_amps: "19.5"         # Upper bound of normal operating current
   fault_trigger_duration: "20s"         # Must be out-of-range for this duration to trigger. Must be bigger than ct_clamp sensor's update_interval.
 
@@ -115,7 +114,7 @@ esphome:
         - switch.turn_on: heater_relay
         - text_sensor.template.publish:
             id: relay_reason
-            state: "Démarrage"
+            state: "${tr_relay_reason_boot}"
     - priority: 599
       then:
         - lambda: 'id(current_out_of_range).send_state_internal(id(current_out_of_range_latch));'
@@ -159,6 +158,7 @@ packages:
 web_server:
   id: id_web_server
   port: 80
+  include_internal: ${web_server_include_internal}
 
 time:
   - platform: ds1307 # actually a DS3231
@@ -349,6 +349,26 @@ number:
     step: 0.5
     initial_value: 5.0
     optimistic: true
+  - platform: template
+    name: "Relay Cycle Count (Set)"
+    id: relay_cycle_count_setter
+    internal: true  # Web UI only, not exposed to Home Assistant
+    icon: "mdi:counter"
+    mode: box
+    min_value: 0
+    max_value: 100000
+    step: 1
+    lambda: |-
+      return id(relay_cycle_count);
+    set_action:
+      - globals.set:
+          id: relay_cycle_count
+          value: !lambda 'return (int)x;'
+      - logger.log:
+          level: WARN
+          tag: "WaterHeater"
+          format: "Relay cycle count manually set to %d"
+          args: ['(int)x']
 
 # -------------------------------------------------------------------
 #   Sensors
@@ -374,16 +394,6 @@ sensor:
     on_value:
       - lambda: id(last_lower_probe_update) = id(id_sntp_time).now().timestamp;
 
-  - platform: dht
-    pin: 
-      number: ${dht_sensor_gpio}
-      mode:
-        input: true
-        pullup: false
-    model: DHT11
-    temperature: { name: "Enclosure Temp", id: id_sens_enclosure_temp }
-    humidity: { name: "Enclosure Humidity", id: id_sens_enclosure_humi }
-    update_interval: 30s
   - platform: uptime
     id: id_uptime_sensor_internal
     internal: true # used for internal logic. Reported sensor value is updated less frequently.
@@ -429,7 +439,6 @@ sensor:
     internal: true
     name: ADC value
     attenuation: 12db
-    #update_interval: 10ms
   - platform: ct_clamp
     sensor: source_adc
     name: "Heater Current"
@@ -451,6 +460,7 @@ sensor:
       - clamp:
           min_value: 0 # do not expose negative values
 #      - delta: 0.2  # Only report if amps change by 0.2A or more
+      - lambda: if (x < 0.2) return 0; else return x; # Kill the "Relay Off" antenna noise
     on_value:
       then:
         - if:
@@ -492,12 +502,6 @@ text_sensor:
     on_value:
       then:
         - component.update: relay_reason_ha_proxy
-  - platform: debug
-    device:
-      name: "Device Info"
-    reset_reason:
-      name: "Reset Reason"
-
 
 select:
   - platform: template
@@ -507,20 +511,20 @@ select:
     entity_category: "diagnostic"
     optimistic: false
     options:
-      - "Démarrage"
-      - "Mode Vacances"
-      - "Cycle Salubrité"
-      - "Contrôle Manuel"
-      - "Période Active"
-      - "Chauffe Éco"
-      - "Période Inactive"
-      - "Failsafe: Erreur"
-      - "⚠️ Erreur Synchro"
+      - "${tr_relay_reason_boot}"
+      - "${tr_relay_reason_vacation}"
+      - "${tr_relay_reason_legionella}"
+      - "${tr_relay_reason_manual}"
+      - "${tr_relay_reason_scheduled}"
+      - "${tr_relay_reason_eco_heating}"
+      - "${tr_relay_reason_eco_idle}"
+      - "${tr_relay_reason_failsafe}"
+      - "${tr_relay_reason_sync_error}"
     lambda: |-
       std::string current_text = id(relay_reason).state;
       
       // Handle the boot/empty state
-      if (current_text.empty()) return {"Démarrage"};
+      if (current_text.empty()) return {"${tr_relay_reason_boot}"};
 
       // Use the API method from the documentation you provided
       if (id(relay_reason_ha_proxy).has_option(current_text)) {
@@ -528,7 +532,7 @@ select:
       }
 
       // Fallback if the string isn't in the options list
-      return {"⚠️ Erreur Synchro"};
+      return {"${tr_relay_reason_sync_error}"};
     
     set_action:
       - logger.log: "Read-only proxy. Change ignored."
@@ -720,6 +724,7 @@ switch:
     pin: 
       number: ${contactor_gpio_pin}
       mode: ${contactor_gpio_pin_mode}
+    inverted: ${contactor_gpio_inverted}
     id: heater_relay
     name: "Water Heater Relay"
     restore_mode: ALWAYS_ON
@@ -960,7 +965,7 @@ script:
           then:
             # Force the relay OFF
             - switch.turn_off: heater_relay
-            - text_sensor.template.publish: { id: relay_reason, state: "${vacation_reason}" }
+            - text_sensor.template.publish: { id: relay_reason, state: "${tr_vacation_reason}" }
             - if:
                 condition:
                   lambda: 'return id(current_operating_mode) != 5;' # 5:Vacation
@@ -1020,7 +1025,7 @@ script:
     mode: single
     then:
       - switch.turn_on: heater_relay
-      - text_sensor.template.publish: { id: relay_reason, state: "Failsafe: Erreur" }
+      - text_sensor.template.publish: { id: relay_reason, state: "${tr_relay_reason_failsafe}" }
       - logger.log:
           level: WARN
           tag: "WaterHeater"
@@ -1036,7 +1041,7 @@ script:
           then:
             - logger.log: { level: INFO, tag: "WaterHeater", format: "Entering Salubrity Cycle." }
             - lambda: 'id(current_operating_mode) = 4;'
-      - text_sensor.template.publish: { id: relay_reason, state: "Cycle Salubrité" }
+      - text_sensor.template.publish: { id: relay_reason, state: "${tr_relay_reason_legionella}" }
       - switch.turn_on: heater_relay
       - if:
           condition:
@@ -1087,7 +1092,7 @@ script:
                 else:
                   - switch.turn_off: desired_state_switch
             - lambda: 'id(has_queued_state) = false;'
-      - text_sensor.template.publish: { id: relay_reason, state: "Contrôle Manuel" }
+      - text_sensor.template.publish: { id: relay_reason, state: "${tr_relay_reason_manual}" }
       - if:
           condition:
             switch.is_on: desired_state_switch
@@ -1107,7 +1112,7 @@ script:
             - logger.log: { level: INFO, tag: "WaterHeater", format: "Entering Scheduled ON mode." }
             - lambda: 'id(current_operating_mode) = 2;'
       - switch.turn_on: heater_relay
-      - text_sensor.template.publish: { id: relay_reason, state: "Période Active" }
+      - text_sensor.template.publish: { id: relay_reason, state: "${tr_relay_reason_scheduled}" }
       - lambda: id(off_peak_heating_active) = false;
 
   # --- Off-Peak Heating Script ---
@@ -1155,25 +1160,25 @@ script:
             if (turn_off) {
               id(heater_relay).turn_off();
               id(off_peak_heating_active) = false;
-              id(relay_reason).publish_state("Période Inactive");
+              id(relay_reason).publish_state("${tr_relay_reason_eco_idle}");
             } else {
               id(heater_relay).turn_on();
-              id(relay_reason).publish_state("Chauffe Éco");
+              id(relay_reason).publish_state("${tr_relay_reason_eco_heating}");
             }
           } else {
             if (compensated_upper < ${off_peak_upper_probe_trigger_celsius}) {
               id(off_peak_heating_active) = true;
               id(off_peak_trigger_is_upper) = true;
               id(heater_relay).turn_on();
-              id(relay_reason).publish_state("Chauffe Éco");
+              id(relay_reason).publish_state("${tr_relay_reason_eco_heating}");
             } else if (compensated_lower < ${off_peak_lower_probe_trigger_celsius}) {
               id(off_peak_heating_active) = true;
               id(off_peak_trigger_is_upper) = false;
               id(heater_relay).turn_on();
-              id(relay_reason).publish_state("Chauffe Éco");
+              id(relay_reason).publish_state("${tr_relay_reason_eco_heating}");
             } else {
               id(heater_relay).turn_off();
-              id(relay_reason).publish_state("Période Inactive");
+              id(relay_reason).publish_state("${tr_relay_reason_eco_idle}");
             }
           }
 
@@ -1187,6 +1192,8 @@ display:
     address: 0x3F
     update_interval: 500ms
     user_characters:
+      - position: 1 # mapped to \x01 (relay power on symbol)
+        data: [0b00100, 0b00100, 0b01110, 0b10101, 0b10101, 0b10001, 0b01110, 0b00000]
       - position: 2 # mapped to \x02 (ô)
         data: [0b00100, 0b01010, 0b00000, 0b01110, 0b10001, 0b10001, 0b01110, 0b00000]
       - position: 3 # mapped to \x03 (é)
@@ -1197,8 +1204,8 @@ display:
         data: [0b01010, 0b01010, 0b11111, 0b11111, 0b01110, 0b00100, 0b00100, 0b00100]
       - position: 6 # mapped to \x06 (lightning bolt)
         data: [0b00010, 0b00110, 0b01100, 0b11100, 0b11111, 0b00110, 0b01100, 0b11000]
-      - position: 7  # mapped to \x07 (relay power on symbol)
-        data: [0b00100, 0b00100, 0b01110, 0b10101, 0b10101, 0b10001, 0b01110, 0b00000]
+      - position: 7  # mapped to \x07 (vacation umbrella on the beach icon)
+        data: [0b00000, 0b00111, 0b01110, 0b11100, 0b10010, 0b00010, 0b00111, 0b11111]
     lambda: |-
       // ---------------------------------------------------------
       // PRIORITY 1: FACTORY RESET BUTTON (GPIO0)
@@ -1208,13 +1215,20 @@ display:
         int held_sec = held_ms / 1000;
         int remaining = 10 - held_sec; 
 
-        it.print(0, 0, "FACTORY RESET");
+        std::string factory_title = "${tr_lcd_factory_reset_title}";
+        size_t pos = 0;
+        while ((pos = factory_title.find("é", pos)) != std::string::npos) { factory_title.replace(pos, 2, "\x03"); pos += 1; }
+        pos = 0;
+        while ((pos = factory_title.find("ô", pos)) != std::string::npos) { factory_title.replace(pos, 2, "\x02"); pos += 1; }
+        pos = 0;
+        while ((pos = factory_title.find("É", pos)) != std::string::npos) { factory_title.replace(pos, 2, "\x04"); pos += 1; }
+        it.print(0, 0, factory_title.c_str());
         
         if (remaining > 0) {
-           it.printf(0, 1, "Hold: %ds...", remaining);
+            it.printf(0, 1, "${tr_lcd_factory_reset_hold}", remaining);
            if (millis() % 500 > 250) it.print(15, 0, "!");
         } else {
-           it.print(0, 1, "RELEASE NOW!");
+            it.print(0, 1, "${tr_lcd_factory_reset_release}");
            it.print(15, 1, "*"); 
         }
         return; 
@@ -1225,7 +1239,7 @@ display:
       // ---------------------------------------------------------
       if (id(boot_screen_active)) {
         // Line 1: Versions
-        it.printf(0, 0, "Chauffe-eau v${config_version}");
+        it.printf(0, 0, "${tr_lcd_boot_splash_title} v${config_version}");
         
         // Line 2: Fast Boot Reset Counter
         // We get 'current_fast_boot_count' from the on_increment trigger.
@@ -1240,9 +1254,9 @@ display:
         
         // If we are getting close, show exclamation!
         if (remaining_boots <= 1) {
-           it.printf(0, 1, "Reset: %d LEFT!", remaining_boots);
+            it.printf(0, 1, "${tr_lcd_boot_reset_warning}", remaining_boots);
         } else {
-           it.printf(0, 1, "Reset: %d left", remaining_boots);
+            it.printf(0, 1, "${tr_lcd_boot_reset_normal}", remaining_boots);
         }
         return; 
       }
@@ -1258,13 +1272,13 @@ display:
 
       if (id(lcd_page) == 0) {
         // Page 1: Temperatures
-        it.printf(0, 0, "Haut:%.1f\xDF""C", id(upper_probe).state);
-        it.printf(0, 1, "Bas :%.1f\xDF""C", id(lower_probe).state);
+        it.printf(0, 0, "${tr_lcd_page0_upper}%.1f\xDF""C", id(upper_probe).state);
+        it.printf(0, 1, "${tr_lcd_page0_lower}%.1f\xDF""C", id(lower_probe).state);
 
       } else if (id(lcd_page) == 1) {
         // Page 2: Relay Status & Amps
-        it.printf(0, 0, "Relais: %s", id(heater_relay).state ? "ON" : "OFF");
-        it.printf(0, 1, "Courant: %.1fA", amps);
+        it.printf(0, 0, "${tr_lcd_page1_relay_fmt}", id(heater_relay).state ? "${tr_lcd_page1_relay_on}" : "${tr_lcd_page1_relay_off}");
+        it.printf(0, 1, "${tr_lcd_page1_current_fmt}", amps);
 
       } else if (id(lcd_page) == 2) {
         // Page 3: Relay Reason (Full detailed text)
@@ -1295,12 +1309,12 @@ display:
         // Page 4: System Status & Clock
         if (wifi_connected) {
             if (ha_connected) {
-                it.print(0, 0, "NET:OK HA:OK");
+            it.print(0, 0, "${tr_lcd_page3_net_ok_ha_ok}");
             } else {
-                it.print(0, 0, "NET:OK HA:NO");
+            it.print(0, 0, "${tr_lcd_page3_net_ok_ha_no}");
             }
         } else {
-            it.print(0, 0, "NET:NO HA:NO");
+          it.print(0, 0, "${tr_lcd_page3_net_no_ha_no}");
         }
         auto time = id(id_ds1307_time).now();
         it.printf(0, 1, "%02d/%02d %02d:%02d", time.day_of_month, time.month, time.hour, time.minute);
@@ -1309,11 +1323,14 @@ display:
         // Page 5: Last Salubrity Check Time
         
         // Line 1: Header (13 chars, fits before icons)
-        it.print(0, 0, "Fin Salubrite");
+        std::string page4_header = "${tr_lcd_page4_header}";
+        size_t pos = 0;
+        while ((pos = page4_header.find("é", pos)) != std::string::npos) { page4_header.replace(pos, 2, "\x03"); pos += 1; }
+        it.print(0, 0, page4_header.c_str());
         
         // Line 2: Time
         if (id(last_legionella_cycle) == 0) {
-            it.print(0, 1, "Jamais");
+          it.print(0, 1, "${tr_lcd_page4_never}");
         } else {
             // Convert the stored timestamp into a local time structure
             auto check_time = ESPTime::from_epoch_local(id(last_legionella_cycle));
@@ -1324,8 +1341,12 @@ display:
       
       // --- Status Icons (Right Aligned, visible on ALL pages) ---
       
-      // (15,0) Relay State
-      if (id(heater_relay).state) it.print(15, 0, "\x07");
+      // (15,0) Vacation icon has priority; otherwise show relay power icon
+      if (id(vacation_mode_switch).state) {
+        it.print(15, 0, "\x07");
+      } else if (id(heater_relay).state) {
+        it.print(15, 0, "\x01");
+      }
       
       // (14,0) Disconnected Icon (Plug)
       if (!ha_connected) it.print(14, 0, "\x05");
