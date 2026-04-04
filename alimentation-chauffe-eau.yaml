@@ -97,7 +97,7 @@ substitutions:
   
   # Current Range Monitoring
   low_current_max_amps: "0.5"           # Acceptable when near zero
-  high_current_min_amps: "17.9"         # Lower bound of normal operating current
+  high_current_min_amps: "17.5"         # Lower bound of normal operating current
   high_current_max_amps: "19.5"         # Upper bound of normal operating current
   fault_trigger_duration: "20s"         # Must be out-of-range for this duration to trigger. Must be bigger than ct_clamp sensor's update_interval.
 
